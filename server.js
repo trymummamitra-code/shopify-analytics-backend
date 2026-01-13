@@ -1,152 +1,185 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Shopify Analytics</title>
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body>
-    <div id="root"></div>
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
+const crypto = require('crypto');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
+const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
+const SHOPIFY_STORE = process.env.SHOPIFY_STORE || 'mummamitra.myshopify.com';
+const REDIRECT_URI = process.env.REDIRECT_URI || 'http://localhost:3000/auth/callback';
+const SCOPES = 'read_orders,read_products,read_customers,write_orders';
+const API_VERSION = '2024-01';
+
+let accessToken = process.env.SHOPIFY_ACCESS_TOKEN || null;
+
+app.use(cors());
+app.use(express.json());
+
+app.get('/', (req, res) => {
+  res.send('<h1>Shopify Backend</h1><p>Status: ' + (accessToken ? 'Connected' : 'Not Connected') + '</p>');
+});
+
+app.get('/auth/shopify', (req, res) => {
+  const state = crypto.randomBytes(16).toString('hex');
+  const authUrl = `https://${SHOPIFY_STORE}/admin/oauth/authorize?client_id=${SHOPIFY_API_KEY}&scope=${SCOPES}&redirect_uri=${REDIRECT_URI}&state=${state}`;
+  res.redirect(authUrl);
+});
+
+app.get('/auth/callback', async (req, res) => {
+  const { code } = req.query;
+  if (!code) return res.status(400).send('No code');
+  
+  try {
+    const response = await axios.post(`https://${SHOPIFY_STORE}/admin/oauth/access_token`, {
+      client_id: SHOPIFY_API_KEY,
+      client_secret: SHOPIFY_API_SECRET,
+      code: code
+    });
+    accessToken = response.data.access_token;
+    res.send('<h1>Success!</h1><p>Token: ' + accessToken + '</p>');
+  } catch (error) {
+    res.status(500).send('Error: ' + error.message);
+  }
+});
+
+const shopifyRequest = async (endpoint) => {
+  if (!accessToken) throw new Error('Not authenticated');
+  const response = await axios.get(`https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/${endpoint}`, {
+    headers: { 'X-Shopify-Access-Token': accessToken }
+  });
+  return response.data;
+};
+
+app.get('/api/orders', async (req, res) => {
+  try {
+    const data = await shopifyRequest('orders.json?limit=250&status=any');
+    res.json({ success: true, orders: data.orders, count: data.orders.length });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/analytics', async (req, res) => {
+  try {
+    const { date = 'today' } = req.query;
+    const data = await shopifyRequest('orders.json?limit=250&status=any');
     
-    <script type="text/babel">
-        const { useState, useEffect } = React;
-        
-        function Dashboard() {
-            const [dateRange, setDateRange] = useState('yesterday');
-            const [isDark, setIsDark] = useState(true);
-            const [loading, setLoading] = useState(true);
-            const [data, setData] = useState(null);
-            const [error, setError] = useState(null);
-            
-            useEffect(() => {
-                fetchData();
-            }, [dateRange]);
-            
-            const fetchData = async () => {
-                setLoading(true);
-                setError(null);
-                
-                try {
-                    const response = await fetch(`https://shopify-analytics-backend-476y.onrender.com/api/analytics?date=${dateRange}&t=${Date.now()}`);
-                    const result = await response.json();
-                    
-                    if (result.success) {
-                        setData(result);
-                    } else {
-                        setError(result.error);
-                    }
-                } catch (err) {
-                    setError(err.message);
-                } finally {
-                    setLoading(false);
-                }
-            };
-            
-            if (loading) {
-                return (
-                    <div className="min-h-screen bg-slate-900 flex items-center justify-center">
-                        <div className="text-white">Loading...</div>
-                    </div>
-                );
-            }
-            
-            if (error) {
-                return (
-                    <div className="min-h-screen bg-slate-900 flex items-center justify-center">
-                        <div className="text-red-400">Error: {error}</div>
-                    </div>
-                );
-            }
-            
-            const totalRevenue = data.analytics.totalRevenue || 0;
-            const totalCOD = data.analytics.totalCODOrders || 0;
-            const totalPrepaid = data.analytics.totalPrepaidOrders || 0;
-            const totalOrders = data.analytics.totalOrders || 1;
-            
-            return (
-                <div className={isDark ? 'bg-slate-900 min-h-screen' : 'bg-slate-50 min-h-screen'}>
-                    <div className="max-w-7xl mx-auto p-6 space-y-6">
-                        
-                        <div className="flex justify-between items-center">
-                            <div>
-                                <h1 className={`text-3xl font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                                    Shopify Analytics
-                                </h1>
-                                <p className={`text-sm mt-1 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                                    Date: {data.targetDate} • Orders: {totalOrders}
-                                </p>
-                            </div>
-                            
-                            <div className="flex gap-3">
-                                <button onClick={() => setIsDark(!isDark)} className="px-4 py-2 rounded bg-slate-800 text-white">
-                                    {isDark ? '☀️' : '🌙'}
-                                </button>
-                                <select value={dateRange} onChange={(e) => setDateRange(e.target.value)} 
-                                    className="px-4 py-2 rounded bg-slate-800 text-white">
-                                    <option value="today">Today</option>
-                                    <option value="yesterday">Yesterday</option>
-                                </select>
-                            </div>
-                        </div>
-                        
-                        <div className="grid grid-cols-4 gap-4">
-                            <div className="bg-blue-600 rounded-xl p-4 text-white">
-                                <div className="text-sm mb-1">Total Orders</div>
-                                <div className="text-3xl font-bold">{totalOrders}</div>
-                            </div>
-                            <div className="bg-green-600 rounded-xl p-4 text-white">
-                                <div className="text-sm mb-1">Revenue</div>
-                                <div className="text-3xl font-bold">₹{Math.round(totalRevenue)}</div>
-                            </div>
-                            <div className="bg-purple-600 rounded-xl p-4 text-white">
-                                <div className="text-sm mb-1">COD</div>
-                                <div className="text-3xl font-bold">{totalCOD}</div>
-                            </div>
-                            <div className="bg-orange-600 rounded-xl p-4 text-white">
-                                <div className="text-sm mb-1">Prepaid</div>
-                                <div className="text-3xl font-bold">{totalPrepaid}</div>
-                            </div>
-                        </div>
-                        
-                        <div className={`rounded-xl overflow-hidden ${isDark ? 'bg-slate-800' : 'bg-white'}`}>
-                            <table className="w-full">
-                                <thead className="bg-slate-900">
-                                    <tr>
-                                        <th className="px-6 py-4 text-left text-sm font-semibold text-slate-300">Product</th>
-                                        <th className="px-6 py-4 text-left text-sm font-semibold text-slate-300">Revenue</th>
-                                        <th className="px-6 py-4 text-left text-sm font-semibold text-slate-300">COD</th>
-                                        <th className="px-6 py-4 text-left text-sm font-semibold text-slate-300">Prepaid</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-700">
-                                    {data.analytics.skus.map((sku, i) => (
-                                        <tr key={i} className="hover:bg-slate-700/50">
-                                            <td className="px-6 py-4">
-                                                <div className="text-white font-medium">{sku.productName}</div>
-                                                <div className="text-sm text-slate-400">{sku.sku}</div>
-                                            </td>
-                                            <td className="px-6 py-4 text-green-400 font-medium">₹{Math.round(sku.totalRevenue)}</td>
-                                            <td className="px-6 py-4 text-slate-300">
-                                                {sku.codOrders > 0 ? `${sku.codOrders} (${Math.round(sku.codOrders/totalOrders*100)}%)` : '-'}
-                                            </td>
-                                            <td className="px-6 py-4 text-slate-300">
-                                                {sku.prepaidOrders > 0 ? `${sku.prepaidOrders} (${Math.round(sku.prepaidOrders/totalOrders*100)}%)` : '-'}
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-            );
-        }
-        
-        ReactDOM.render(<Dashboard />, document.getElementById('root'));
-    </script>
-</body>
-</html>
+    const now = new Date();
+    const todayIST = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const yesterdayDate = new Date(now.getTime() - 86400000);
+    const yesterdayIST = yesterdayDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const targetDate = date === 'today' ? todayIST : yesterdayIST;
+    
+    const filteredOrders = data.orders.filter(order => {
+      const orderDateIST = new Date(order.created_at).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+      return orderDateIST === targetDate;
+    });
+    
+    const analytics = processOrders(filteredOrders);
+    
+    res.json({
+      success: true,
+      date,
+      targetDate,
+      analytics
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+function processOrders(orders) {
+  const skuData = {};
+  let codCount = 0;
+  let prepaidCount = 0;
+  let codRevenue = 0;
+  let prepaidRevenue = 0;
+  const seenOrders = new Set();
+  
+  orders.forEach(order => {
+    const isCOD = order.payment_gateway_names?.some(gw => 
+      gw.toLowerCase().includes('cod') || gw.toLowerCase().includes('cash on delivery')
+    );
+    
+    const orderTotal = parseFloat(order.total_price || 0);
+    
+    if (!seenOrders.has(order.id)) {
+      seenOrders.add(order.id);
+      if (isCOD) {
+        codCount++;
+        codRevenue += orderTotal;
+      } else {
+        prepaidCount++;
+        prepaidRevenue += orderTotal;
+      }
+    }
+    
+    const itemsTotal = order.line_items?.reduce((sum, item) => 
+      sum + (parseFloat(item.price) * item.quantity), 0) || 1;
+    
+    order.line_items?.forEach(item => {
+      const sku = item.sku || item.variant_id || 'unknown';
+      
+      if (!skuData[sku]) {
+        skuData[sku] = {
+          sku,
+          productName: item.name,
+          codRevenue: 0,
+          prepaidRevenue: 0,
+          totalRevenue: 0,
+          codOrders: 0,
+          prepaidOrders: 0,
+          codOrderIds: new Set(),
+          prepaidOrderIds: new Set()
+        };
+      }
+      
+      // Track unique orders per SKU
+      if (isCOD && !skuData[sku].codOrderIds.has(order.id)) {
+        skuData[sku].codOrderIds.add(order.id);
+        skuData[sku].codOrders++;
+      } else if (!isCOD && !skuData[sku].prepaidOrderIds.has(order.id)) {
+        skuData[sku].prepaidOrderIds.add(order.id);
+        skuData[sku].prepaidOrders++;
+      }
+      
+      const itemSubtotal = parseFloat(item.price) * item.quantity;
+      const proportion = itemSubtotal / itemsTotal;
+      const skuRevenue = orderTotal * proportion;
+      
+      if (isCOD) {
+        skuData[sku].codRevenue += skuRevenue;
+      } else {
+        skuData[sku].prepaidRevenue += skuRevenue;
+      }
+      
+      skuData[sku].totalRevenue += skuRevenue;
+    });
+  });
+  
+  // Clean up and convert to array
+  const skus = Object.values(skuData).map(sku => ({
+    sku: sku.sku,
+    productName: sku.productName,
+    codRevenue: sku.codRevenue,
+    prepaidRevenue: sku.prepaidRevenue,
+    totalRevenue: sku.totalRevenue,
+    codOrders: sku.codOrders,
+    prepaidOrders: sku.prepaidOrders
+  }));
+  
+  return { 
+    totalOrders: orders.length,
+    totalCODOrders: codCount,
+    totalPrepaidOrders: prepaidCount,
+    totalRevenue: codRevenue + prepaidRevenue,
+    skus
+  };
+}
+
+app.listen(PORT, () => {
+  console.log('Server running on port ' + PORT);
+});
