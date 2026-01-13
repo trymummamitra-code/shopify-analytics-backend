@@ -78,13 +78,16 @@ app.get('/api/analytics', async (req, res) => {
       return orderDateIST === targetDate;
     });
     
+    const rawTotal = filteredOrders.reduce((sum, o) => sum + parseFloat(o.total_price || 0), 0);
+    
     const analytics = processOrders(filteredOrders);
     
     res.json({
       success: true,
       date,
       targetDate,
-      analytics
+      analytics,
+      rawOrderTotal: rawTotal.toFixed(2)
     });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -117,7 +120,6 @@ function processOrders(orders) {
       }
     }
     
-    // For SKU breakdown, distribute order total proportionally
     const itemsTotal = order.line_items?.reduce((sum, item) => 
       sum + (parseFloat(item.price) * item.quantity), 0) || 1;
     
@@ -134,7 +136,6 @@ function processOrders(orders) {
         };
       }
       
-      // Proportional revenue for this SKU
       const itemSubtotal = parseFloat(item.price) * item.quantity;
       const proportion = itemSubtotal / itemsTotal;
       const skuRevenue = orderTotal * proportion;
