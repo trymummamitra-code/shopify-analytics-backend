@@ -95,6 +95,8 @@ function processOrders(orders) {
   const skuData = {};
   let codCount = 0;
   let prepaidCount = 0;
+  let codRevenue = 0;
+  let prepaidRevenue = 0;
   const seenOrders = new Set();
   
   orders.forEach(order => {
@@ -102,10 +104,22 @@ function processOrders(orders) {
       gw.toLowerCase().includes('cod') || gw.toLowerCase().includes('cash on delivery')
     );
     
+    const orderTotal = parseFloat(order.total_price || 0);
+    
     if (!seenOrders.has(order.id)) {
       seenOrders.add(order.id);
-      if (isCOD) codCount++; else prepaidCount++;
+      if (isCOD) {
+        codCount++;
+        codRevenue += orderTotal;
+      } else {
+        prepaidCount++;
+        prepaidRevenue += orderTotal;
+      }
     }
+    
+    // For SKU breakdown, distribute order total proportionally
+    const itemsTotal = order.line_items?.reduce((sum, item) => 
+      sum + (parseFloat(item.price) * item.quantity), 0) || 1;
     
     order.line_items?.forEach(item => {
       const sku = item.sku || item.variant_id || 'unknown';
@@ -120,15 +134,18 @@ function processOrders(orders) {
         };
       }
       
-      const itemTotal = parseFloat(item.price) * item.quantity;
+      // Proportional revenue for this SKU
+      const itemSubtotal = parseFloat(item.price) * item.quantity;
+      const proportion = itemSubtotal / itemsTotal;
+      const skuRevenue = orderTotal * proportion;
       
       if (isCOD) {
-        skuData[sku].codRevenue += itemTotal;
+        skuData[sku].codRevenue += skuRevenue;
       } else {
-        skuData[sku].prepaidRevenue += itemTotal;
+        skuData[sku].prepaidRevenue += skuRevenue;
       }
       
-      skuData[sku].totalRevenue += itemTotal;
+      skuData[sku].totalRevenue += skuRevenue;
     });
   });
   
@@ -136,6 +153,7 @@ function processOrders(orders) {
     totalOrders: orders.length,
     totalCODOrders: codCount,
     totalPrepaidOrders: prepaidCount,
+    totalRevenue: codRevenue + prepaidRevenue,
     skus: Object.values(skuData) 
   };
 }
