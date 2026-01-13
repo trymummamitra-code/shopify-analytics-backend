@@ -97,7 +97,19 @@ app.get('/api/analytics', async (req, res) => {
       return orderDateIST === targetDate;
     });
     
-    const analytics = processOrders(filteredOrders);
+const analytics = processOrders(filteredOrders);
+
+res.json({
+  success: true,
+  date,
+  targetDate,
+  analytics: {
+    totalOrders: analytics.totalOrders,
+    totalCODOrders: analytics.totalCODOrders,
+    totalPrepaidOrders: analytics.totalPrepaidOrders,
+    skus: analytics.skus
+  }
+});
     
     res.json({
       success: true,
@@ -112,11 +124,24 @@ app.get('/api/analytics', async (req, res) => {
 
 function processOrders(orders) {
   const skuData = {};
+  const orderIds = new Set();
+  let totalCODOrders = 0;
+  let totalPrepaidOrders = 0;
   
   orders.forEach(order => {
     const isCOD = order.payment_gateway_names?.some(gw => 
       gw.toLowerCase().includes('cod') || gw.toLowerCase().includes('cash on delivery')
     );
+    
+    // Count unique orders only once
+    if (!orderIds.has(order.id)) {
+      orderIds.add(order.id);
+      if (isCOD) {
+        totalCODOrders++;
+      } else {
+        totalPrepaidOrders++;
+      }
+    }
     
     order.line_items?.forEach(item => {
       const sku = item.sku || item.variant_id || 'unknown';
@@ -137,19 +162,21 @@ function processOrders(orders) {
       const itemTotal = parseFloat(item.price) * item.quantity;
       
       if (isCOD) {
-        skuData[sku].codOrders += 1;
         skuData[sku].codRevenue += itemTotal;
       } else {
-        skuData[sku].prepaidOrders += 1;
         skuData[sku].prepaidRevenue += itemTotal;
       }
       
-      skuData[sku].totalOrders += 1;
       skuData[sku].totalRevenue += itemTotal;
     });
   });
   
-  return { totalOrders: orders.length, skus: Object.values(skuData) };
+  return { 
+    totalOrders: orders.length,
+    totalCODOrders,
+    totalPrepaidOrders,
+    skus: Object.values(skuData) 
+  };
 }
 
 app.listen(PORT, () => {
