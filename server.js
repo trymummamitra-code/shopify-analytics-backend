@@ -262,14 +262,46 @@ app.get('/api/analytics', async (req, res) => {
   try {
     const { date = 'today' } = req.query;
     
-    // Calculate date range
-    let created_at_min, created_at_max;
+    // Force IST calculations
     const now = new Date();
+    const istOffset = 5.5 * 60 * 60 * 1000; // IST is UTC+5:30
+    const nowIST = new Date(now.getTime() + istOffset);
     
-// IST timezone offset
-const getISTDate = (date) => {
-  return new Date(date.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-};
+    let startDate, endDate;
+    
+    if (date === 'today') {
+      startDate = new Date(Date.UTC(nowIST.getUTCFullYear(), nowIST.getUTCMonth(), nowIST.getUTCDate(), 0, 0, 0) - istOffset);
+      endDate = new Date(Date.UTC(nowIST.getUTCFullYear(), nowIST.getUTCMonth(), nowIST.getUTCDate(), 23, 59, 59) - istOffset);
+    } else if (date === 'yesterday') {
+      const yesterdayIST = new Date(nowIST);
+      yesterdayIST.setUTCDate(yesterdayIST.getUTCDate() - 1);
+      startDate = new Date(Date.UTC(yesterdayIST.getUTCFullYear(), yesterdayIST.getUTCMonth(), yesterdayIST.getUTCDate(), 0, 0, 0) - istOffset);
+      endDate = new Date(Date.UTC(yesterdayIST.getUTCFullYear(), yesterdayIST.getUTCMonth(), yesterdayIST.getUTCDate(), 23, 59, 59) - istOffset);
+    }
+    
+    const created_at_min = startDate.toISOString();
+    const created_at_max = endDate.toISOString();
+    
+    const data = await shopifyRequest(
+      `orders.json?limit=250&status=any&created_at_min=${created_at_min}&created_at_max=${created_at_max}`
+    );
+    
+    const analytics = processOrders(data.orders);
+    
+    res.json({
+      success: true,
+      date,
+      dateRange: { start: created_at_min, end: created_at_max },
+      analytics
+    });
+  } catch (error) {
+    console.error('Error fetching analytics:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 
 const nowIST = getISTDate(new Date());
 
