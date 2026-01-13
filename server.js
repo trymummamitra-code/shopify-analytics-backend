@@ -1,4 +1,3 @@
-// server.js - Complete backend with OAuth for Shopify
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -20,11 +19,7 @@ app.use(cors());
 app.use(express.json());
 
 app.get('/', (req, res) => {
-  res.send(`
-    <h1>Shopify Analytics Backend</h1>
-    <p>Status: ${accessToken ? 'Connected' : 'Not Connected'}</p>
-    <p><a href="/auth/shopify">Connect to Shopify</a></p>
-  `);
+  res.send('<h1>Shopify Backend</h1><p>Status: ' + (accessToken ? 'Connected' : 'Not Connected') + '</p>');
 });
 
 app.get('/auth/shopify', (req, res) => {
@@ -35,25 +30,25 @@ app.get('/auth/shopify', (req, res) => {
 
 app.get('/auth/callback', async (req, res) => {
   const { code } = req.query;
-  if (!code) return res.status(400).send('No code provided');
+  if (!code) return res.status(400).send('No code');
   
   try {
-    const tokenResponse = await axios.post(`https://${SHOPIFY_STORE}/admin/oauth/access_token`, {
+    const response = await axios.post(`https://${SHOPIFY_STORE}/admin/oauth/access_token`, {
       client_id: SHOPIFY_API_KEY,
       client_secret: SHOPIFY_API_SECRET,
       code: code
     });
-    accessToken = tokenResponse.data.access_token;
-    res.send(`<h1>Success!</h1><p>Token: ${accessToken}</p><p>Save this as SHOPIFY_ACCESS_TOKEN env variable</p>`);
+    accessToken = response.data.access_token;
+    res.send('<h1>Success!</h1><p>Token: ' + accessToken + '</p>');
   } catch (error) {
-    res.status(500).send(`Error: ${error.message}`);
+    res.status(500).send('Error: ' + error.message);
   }
 });
 
 const shopifyRequest = async (endpoint) => {
   if (!accessToken) throw new Error('Not authenticated');
   const response = await axios.get(`https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/${endpoint}`, {
-    headers: { 'X-Shopify-Access-Token': accessToken, 'Content-Type': 'application/json' }
+    headers: { 'X-Shopify-Access-Token': accessToken }
   });
   return response.data;
 };
@@ -67,49 +62,23 @@ app.get('/api/orders', async (req, res) => {
   }
 });
 
-app.get('/api/products', async (req, res) => {
-  try {
-    const data = await shopifyRequest('products.json?limit=250');
-    res.json({ success: true, products: data.products, count: data.products.length });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
 app.get('/api/analytics', async (req, res) => {
   try {
     const { date = 'today' } = req.query;
-    
     const data = await shopifyRequest('orders.json?limit=250&status=any');
     
-    // Get target date in YYYY-MM-DD format for IST
     const now = new Date();
     const todayIST = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-    
     const yesterdayDate = new Date(now.getTime() - 86400000);
     const yesterdayIST = yesterdayDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-    
     const targetDate = date === 'today' ? todayIST : yesterdayIST;
     
-    // Filter orders by IST date
     const filteredOrders = data.orders.filter(order => {
       const orderDateIST = new Date(order.created_at).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
       return orderDateIST === targetDate;
     });
     
-const analytics = processOrders(filteredOrders);
-
-res.json({
-  success: true,
-  date,
-  targetDate,
-  analytics: {
-    totalOrders: analytics.totalOrders,
-    totalCODOrders: analytics.totalCODOrders,
-    totalPrepaidOrders: analytics.totalPrepaidOrders,
-    skus: analytics.skus
-  }
-});
+    const analytics = processOrders(filteredOrders);
     
     res.json({
       success: true,
@@ -124,23 +93,18 @@ res.json({
 
 function processOrders(orders) {
   const skuData = {};
-  const orderIds = new Set();
-  let totalCODOrders = 0;
-  let totalPrepaidOrders = 0;
+  let codCount = 0;
+  let prepaidCount = 0;
+  const seenOrders = new Set();
   
   orders.forEach(order => {
     const isCOD = order.payment_gateway_names?.some(gw => 
       gw.toLowerCase().includes('cod') || gw.toLowerCase().includes('cash on delivery')
     );
     
-    // Count unique orders only once
-    if (!orderIds.has(order.id)) {
-      orderIds.add(order.id);
-      if (isCOD) {
-        totalCODOrders++;
-      } else {
-        totalPrepaidOrders++;
-      }
+    if (!seenOrders.has(order.id)) {
+      seenOrders.add(order.id);
+      if (isCOD) codCount++; else prepaidCount++;
     }
     
     order.line_items?.forEach(item => {
@@ -150,11 +114,8 @@ function processOrders(orders) {
         skuData[sku] = {
           sku,
           productName: item.name,
-          codOrders: 0,
-          prepaidOrders: 0,
           codRevenue: 0,
           prepaidRevenue: 0,
-          totalOrders: 0,
           totalRevenue: 0
         };
       }
@@ -173,12 +134,12 @@ function processOrders(orders) {
   
   return { 
     totalOrders: orders.length,
-    totalCODOrders,
-    totalPrepaidOrders,
+    totalCODOrders: codCount,
+    totalPrepaidOrders: prepaidCount,
     skus: Object.values(skuData) 
   };
 }
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log('Server running on port ' + PORT);
 });
