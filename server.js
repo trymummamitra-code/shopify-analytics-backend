@@ -262,44 +262,38 @@ app.get('/api/analytics', async (req, res) => {
   try {
     const { date = 'today' } = req.query;
     
-    // Force IST calculations
+    // Fetch recent orders (last 7 days worth)
+    const data = await shopifyRequest('orders.json?limit=250&status=any');
+    
+    // Get today's date in IST
     const now = new Date();
-    const istOffset = 5.5 * 60 * 60 * 1000; // IST is UTC+5:30
-    const nowIST = new Date(now.getTime() + istOffset);
+    const istString = now.toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).split(',')[0]; // YYYY-MM-DD format
     
-    let startDate, endDate;
+    const todayIST = istString;
+    const yesterdayDate = new Date(now);
+    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+    const yesterdayIST = yesterdayDate.toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).split(',')[0];
     
-    if (date === 'today') {
-      startDate = new Date(Date.UTC(nowIST.getUTCFullYear(), nowIST.getUTCMonth(), nowIST.getUTCDate(), 0, 0, 0) - istOffset);
-      endDate = new Date(Date.UTC(nowIST.getUTCFullYear(), nowIST.getUTCMonth(), nowIST.getUTCDate(), 23, 59, 59) - istOffset);
-    } else if (date === 'yesterday') {
-      const yesterdayIST = new Date(nowIST);
-      yesterdayIST.setUTCDate(yesterdayIST.getUTCDate() - 1);
-      startDate = new Date(Date.UTC(yesterdayIST.getUTCFullYear(), yesterdayIST.getUTCMonth(), yesterdayIST.getUTCDate(), 0, 0, 0) - istOffset);
-      endDate = new Date(Date.UTC(yesterdayIST.getUTCFullYear(), yesterdayIST.getUTCMonth(), yesterdayIST.getUTCDate(), 23, 59, 59) - istOffset);
-    }
+    const targetDate = date === 'today' ? todayIST : yesterdayIST;
     
-    const created_at_min = startDate.toISOString();
-    const created_at_max = endDate.toISOString();
+    // Filter orders by their created_at date in IST
+    const filteredOrders = data.orders.filter(order => {
+      const orderDate = new Date(order.created_at).toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).split(',')[0];
+      return orderDate === targetDate;
+    });
     
-    const data = await shopifyRequest(
-      `orders.json?limit=250&status=any&created_at_min=${created_at_min}&created_at_max=${created_at_max}`
-    );
-    
-    const analytics = processOrders(data.orders);
+    const analytics = processOrders(filteredOrders);
     
     res.json({
       success: true,
       date,
-      dateRange: { start: created_at_min, end: created_at_max },
+      targetDate,
+      totalOrdersFetched: data.orders.length,
       analytics
     });
   } catch (error) {
     console.error('Error fetching analytics:', error.message);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
