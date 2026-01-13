@@ -266,15 +266,24 @@ app.get('/api/analytics', async (req, res) => {
     let created_at_min, created_at_max;
     const now = new Date();
     
-    if (date === 'today') {
-      created_at_min = new Date(now.setHours(0, 0, 0, 0)).toISOString();
-      created_at_max = new Date(now.setHours(23, 59, 59, 999)).toISOString();
-    } else if (date === 'yesterday') {
-      const yesterday = new Date(now);
-      yesterday.setDate(yesterday.getDate() - 1);
-      created_at_min = new Date(yesterday.setHours(0, 0, 0, 0)).toISOString();
-      created_at_max = new Date(yesterday.setHours(23, 59, 59, 999)).toISOString();
-    }
+// IST timezone offset
+const getISTDate = (date) => {
+  return new Date(date.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+};
+
+const nowIST = getISTDate(new Date());
+
+if (date === 'today') {
+  const todayStart = new Date(nowIST.setHours(0, 0, 0, 0));
+  const todayEnd = new Date(nowIST.setHours(23, 59, 59, 999));
+  created_at_min = todayStart.toISOString();
+  created_at_max = todayEnd.toISOString();
+} else if (date === 'yesterday') {
+  const yesterday = new Date(nowIST);
+  yesterday.setDate(yesterday.getDate() - 1);
+  created_at_min = new Date(yesterday.setHours(0, 0, 0, 0)).toISOString();
+  created_at_max = new Date(yesterday.setHours(23, 59, 59, 999)).toISOString();
+}
     
     const data = await shopifyRequest(
       `orders.json?limit=250&status=any&created_at_min=${created_at_min}&created_at_max=${created_at_max}`
