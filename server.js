@@ -67,7 +67,6 @@ const getShiprocketToken = async () => {
   }
   
   if (!SHIPROCKET_EMAIL || !SHIPROCKET_PASSWORD) {
-    console.log('Shiprocket credentials missing');
     return null;
   }
   
@@ -78,7 +77,7 @@ const getShiprocketToken = async () => {
     });
     
     shiprocketToken = response.data.token;
-    shiprocketTokenExpiry = Date.now() + (10 * 24 * 60 * 60 * 1000); // 10 days
+    shiprocketTokenExpiry = Date.now() + (10 * 24 * 60 * 60 * 1000);
     console.log('✓ Shiprocket authenticated');
     
     return shiprocketToken;
@@ -110,10 +109,20 @@ const fetchShiprocketOrders = async () => {
       
       if (status === 'cancelled' || status === 'canceled') {
         deliveryStatus = 'cancelled';
+      } else if (
+        shipmentStatus.includes('rto initiated') || 
+        shipmentStatus.includes('rto in transit') ||
+        shipmentStatus.includes('rto ndr') ||
+        shipmentStatus.includes('rto ofd') ||
+        shipmentStatus.includes('rto delivered') ||
+        shipmentStatus.includes('rto acknowledged') ||
+        shipmentStatus.includes('rto lock') ||
+        shipmentStatus.includes('rto requested') ||
+        status.includes('rto')
+      ) {
+        deliveryStatus = 'rto';
       } else if (shipmentStatus.includes('delivered')) {
         deliveryStatus = 'delivered';
-      } else if (shipmentStatus.includes('rto') || status.includes('rto')) {
-        deliveryStatus = 'rto';
       } else if (shipmentStatus.includes('transit') || shipmentStatus.includes('shipped')) {
         deliveryStatus = 'in_transit';
       }
@@ -169,6 +178,24 @@ const fetchMetaAdSpend = async (startDate, endDate) => {
   }
 };
 
+const extractProductFromUTM = (landingPageUrl) => {
+  if (!landingPageUrl) return null;
+  
+  try {
+    const url = new URL(landingPageUrl);
+    const utmCampaign = url.searchParams.get('utm_campaign');
+    
+    if (utmCampaign) {
+      const productName = utmCampaign.split('_')[0].trim().toLowerCase();
+      return productName;
+    }
+  } catch (e) {
+    return null;
+  }
+  
+  return null;
+};
+
 app.get('/api/analytics', async (req, res) => {
   try {
     const { date = 'today' } = req.query;
@@ -200,11 +227,13 @@ app.get('/api/analytics', async (req, res) => {
 
 function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
   const skuData = {};
+  const attributionMap = {};
   let codCount = 0;
   let prepaidCount = 0;
   let codRevenue = 0;
   let prepaidRevenue = 0;
   const seenOrders = new Set();
+  let manualReviewCount = 0;
   
   orders.forEach(order => {
     const isCOD = order.payment_gateway_names?.some(gw => 
@@ -224,6 +253,57 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
         prepaidCount++;
         prepaidRevenue += orderTotal;
       }
+    }
+    
+    // Attribution logic
+    let attributedProduct = null;
+    const landingPageUrl = order.landing_site;
+    const utmProduct = extractProductFromUTM(landingPageUrl);
+    
+    if (utmProduct) {
+      attributedProduct = utmProduct;
+      console.log(`✓ UTM attribution: Order ${orderNumber} → ${utmProduct}`);
+    } else {
+      // Fallback: No UTM
+      const lineItems = order.line_items || [];
+      
+      if (lineItems.length === 1) {
+        // Single SKU - easy
+        const productName = lineItems[0].name.toLowerCase();
+        const productKey = productName.split('™')[0].split('–')[0].trim();
+        attributedProduct = productKey;
+        console.log(`○ Single SKU fallback: Order ${orderNumber} → ${productKey}`);
+      } else if (lineItems.length > 1) {
+        // Multi-SKU - find dominant by revenue
+        const revenueMap = {};
+        lineItems.forEach(item => {
+          const productName = item.name.toLowerCase();
+          const productKey = productName.split('™')[0].split('–')[0].trim();
+          const itemRevenue = parseFloat(item.price) * item.quantity;
+          revenueMap[productKey] = (revenueMap[productKey] || 0) + itemRevenue;
+        });
+        
+        const sorted = Object.entries(revenueMap).sort((a, b) => b[1] - a[1]);
+        const topProduct = sorted[0];
+        const topRevenue = topProduct[1];
+        const totalRevenue = Object.values(revenueMap).reduce((a, b) => a + b, 0);
+        
+        if (topRevenue / totalRevenue > 0.5) {
+          attributedProduct = topProduct[0];
+          console.log(`○ Dominant product: Order ${orderNumber} → ${topProduct[0]} (${Math.round(topRevenue/totalRevenue*100)}%)`);
+        } else {
+          console.log(`🚩 Manual review: Order ${orderNumber} - No clear dominant product`);
+          manualReviewCount++;
+        }
+      }
+    }
+    
+    if (attributedProduct) {
+      if (!attributionMap[attributedProduct]) {
+        attributionMap[attributedProduct] = { orders: 0, codOrders: 0 };
+      }
+      attributionMap[attributedProduct].orders++;
+      if (isCOD) attributionMap[attributedProduct].codOrders++;
     }
     
     const itemsTotal = order.line_items?.reduce((sum, item) => 
@@ -264,9 +344,6 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
         skuData[sku].prepaidOrders++;
         
         if (shiprocketStatus === 'delivered') skuData[sku].deliveredOrders++;
-        else if (shiprocketStatus === 'rto') skuData[sku].rtoOrders++;
-        else if (shiprocketStatus === 'cancelled') skuData[sku].cancelledOrders++;
-        else if (shiprocketStatus === 'in_transit') skuData[sku].inTransitOrders++;
       }
       
       const itemSubtotal = parseFloat(item.price) * item.quantity;
@@ -285,17 +362,22 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
   
   const skus = Object.values(skuData).map(sku => {
     const productNameLower = sku.productName.toLowerCase();
-    let adSpend = 0;
+    const productKey = productNameLower.split('™')[0].split('–')[0].trim();
     
+    let adSpend = 0;
     for (const [campaignName, spend] of Object.entries(adSpendByProduct)) {
-      if (productNameLower.startsWith(campaignName)) {
+      if (productKey.startsWith(campaignName)) {
         adSpend += spend;
       }
     }
     
+    const attribution = attributionMap[productKey] || { orders: 0, codOrders: 0 };
+    const attributedOrders = attribution.orders;
+    const cac = attributedOrders > 0 ? adSpend / attributedOrders : 0;
+    
     const totalOrders = sku.codOrders + sku.prepaidOrders;
-    const rtoRate = totalOrders > 0 ? (sku.rtoOrders / totalOrders * 100) : 0;
-    const cancellationRate = totalOrders > 0 ? (sku.cancelledOrders / totalOrders * 100) : 0;
+    const rtoRate = sku.codOrders > 0 ? (sku.rtoOrders / sku.codOrders * 100) : 0;
+    const cancellationRate = sku.codOrders > 0 ? (sku.cancelledOrders / sku.codOrders * 100) : 0;
     const deliveryRate = totalOrders > 0 ? (sku.deliveredOrders / totalOrders * 100) : 0;
     
     return {
@@ -307,6 +389,8 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
       codOrders: sku.codOrders,
       prepaidOrders: sku.prepaidOrders,
       adSpend: adSpend,
+      attributedOrders: attributedOrders,
+      cac: cac,
       deliveredOrders: sku.deliveredOrders,
       rtoOrders: sku.rtoOrders,
       cancelledOrders: sku.cancelledOrders,
@@ -322,6 +406,7 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
     totalCODOrders: codCount,
     totalPrepaidOrders: prepaidCount,
     totalRevenue: codRevenue + prepaidRevenue,
+    manualReviewCount: manualReviewCount,
     skus
   };
 }
