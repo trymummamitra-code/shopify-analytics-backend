@@ -102,8 +102,8 @@ const fetchShiprocketOrders = async () => {
     
     orders.forEach(order => {
       const orderNumber = order.channel_order_id;
-      const status = order.status?.toLowerCase() || '';
-      const shipmentStatus = order.shipments?.[0]?.status?.toLowerCase() || '';
+      const status = String(order.status || '').toLowerCase();
+      const shipmentStatus = String(order.shipments?.[0]?.status || '').toLowerCase();
       
       let deliveryStatus = 'pending';
       
@@ -118,6 +118,7 @@ const fetchShiprocketOrders = async () => {
         shipmentStatus.includes('rto acknowledged') ||
         shipmentStatus.includes('rto lock') ||
         shipmentStatus.includes('rto requested') ||
+        shipmentStatus.includes('rto') ||
         status.includes('rto')
       ) {
         deliveryStatus = 'rto';
@@ -227,7 +228,7 @@ app.get('/api/analytics', async (req, res) => {
 
 function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
   const skuData = {};
-  const attributionMap = {};
+  const productAttributionMap = {};
   let codCount = 0;
   let prepaidCount = 0;
   let codRevenue = 0;
@@ -262,19 +263,14 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
     
     if (utmProduct) {
       attributedProduct = utmProduct;
-      console.log(`✓ UTM attribution: Order ${orderNumber} → ${utmProduct}`);
     } else {
-      // Fallback: No UTM
       const lineItems = order.line_items || [];
       
       if (lineItems.length === 1) {
-        // Single SKU - easy
         const productName = lineItems[0].name.toLowerCase();
         const productKey = productName.split('™')[0].split('–')[0].trim();
         attributedProduct = productKey;
-        console.log(`○ Single SKU fallback: Order ${orderNumber} → ${productKey}`);
       } else if (lineItems.length > 1) {
-        // Multi-SKU - find dominant by revenue
         const revenueMap = {};
         lineItems.forEach(item => {
           const productName = item.name.toLowerCase();
@@ -290,20 +286,18 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
         
         if (topRevenue / totalRevenue > 0.5) {
           attributedProduct = topProduct[0];
-          console.log(`○ Dominant product: Order ${orderNumber} → ${topProduct[0]} (${Math.round(topRevenue/totalRevenue*100)}%)`);
         } else {
-          console.log(`🚩 Manual review: Order ${orderNumber} - No clear dominant product`);
           manualReviewCount++;
         }
       }
     }
     
     if (attributedProduct) {
-      if (!attributionMap[attributedProduct]) {
-        attributionMap[attributedProduct] = { orders: 0, codOrders: 0 };
+      if (!productAttributionMap[attributedProduct]) {
+        productAttributionMap[attributedProduct] = { orders: 0, codOrders: 0 };
       }
-      attributionMap[attributedProduct].orders++;
-      if (isCOD) attributionMap[attributedProduct].codOrders++;
+      productAttributionMap[attributedProduct].orders++;
+      if (isCOD) productAttributionMap[attributedProduct].codOrders++;
     }
     
     const itemsTotal = order.line_items?.reduce((sum, item) => 
@@ -371,14 +365,13 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
       }
     }
     
-    const attribution = attributionMap[productKey] || { orders: 0, codOrders: 0 };
+    const attribution = productAttributionMap[productKey] || { orders: 0 };
     const attributedOrders = attribution.orders;
     const cac = attributedOrders > 0 ? adSpend / attributedOrders : 0;
     
     const totalOrders = sku.codOrders + sku.prepaidOrders;
     const rtoRate = sku.codOrders > 0 ? (sku.rtoOrders / sku.codOrders * 100) : 0;
     const cancellationRate = sku.codOrders > 0 ? (sku.cancelledOrders / sku.codOrders * 100) : 0;
-    const deliveryRate = totalOrders > 0 ? (sku.deliveredOrders / totalOrders * 100) : 0;
     
     return {
       sku: sku.sku,
@@ -388,6 +381,7 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
       totalRevenue: sku.totalRevenue,
       codOrders: sku.codOrders,
       prepaidOrders: sku.prepaidOrders,
+      totalOrders: totalOrders,
       adSpend: adSpend,
       attributedOrders: attributedOrders,
       cac: cac,
@@ -396,8 +390,7 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
       cancelledOrders: sku.cancelledOrders,
       inTransitOrders: sku.inTransitOrders,
       rtoRate: rtoRate,
-      cancellationRate: cancellationRate,
-      deliveryRate: deliveryRate
+      cancellationRate: cancellationRate
     };
   });
   
