@@ -87,7 +87,7 @@ const getShiprocketToken = async () => {
   }
 };
 
-const fetchShiprocketOrdersForDateRange = async (startDate, endDate) => {
+const fetchShiprocketOrders = async (startDate, endDate) => {
   const token = await getShiprocketToken();
   if (!token) return [];
   
@@ -102,7 +102,7 @@ const fetchShiprocketOrdersForDateRange = async (startDate, endDate) => {
       }
     });
     
-    console.log(`✓ Fetched ${response.data.data.length} Shiprocket orders from ${startDate} to ${endDate}`);
+    console.log(`✓ Fetched ${response.data.data.length} Shiprocket orders (${startDate} to ${endDate})`);
     return response.data.data || [];
   } catch (error) {
     console.error('Shiprocket fetch error:', error.response?.data || error.message);
@@ -110,7 +110,7 @@ const fetchShiprocketOrdersForDateRange = async (startDate, endDate) => {
   }
 };
 
-const fetchShiprocketStatuses = async () => {
+const fetchCurrentShiprocketStatuses = async () => {
   const token = await getShiprocketToken();
   if (!token) return {};
   
@@ -120,20 +120,14 @@ const fetchShiprocketStatuses = async () => {
       params: { per_page: 250 }
     });
     
-    const orderStatusMap = {};
+    const statusMap = {};
     
     response.data.data.forEach(order => {
-      const orderNumber = order.channel_order_id;
+      const orderNum = order.channel_order_id;
       const status = order.shipments?.[0]?.status;
       const mainStatus = String(order.status || '').toLowerCase();
       
       let deliveryStatus = 'pending';
-      
-      // Status codes from Shiprocket:
-      // 6 = Delivered
-      // 7 = Delivered (alternate)
-      // 9-17 = Various RTO statuses
-      // 8 = Cancelled
       
       if (mainStatus === 'canceled' || mainStatus === 'cancelled' || status === 8) {
         deliveryStatus = 'cancelled';
@@ -145,13 +139,13 @@ const fetchShiprocketStatuses = async () => {
         deliveryStatus = 'in_transit';
       }
       
-      orderStatusMap[orderNumber] = deliveryStatus;
+      statusMap[orderNum] = deliveryStatus;
     });
     
     console.log(`✓ Fetched ${response.data.data.length} current Shiprocket statuses`);
-    return orderStatusMap;
+    return statusMap;
   } catch (error) {
-    console.error('Shiprocket orders error:', error.response?.data || error.message);
+    console.error('Shiprocket status error:', error.response?.data || error.message);
     return {};
   }
 };
@@ -261,44 +255,61 @@ app.get('/api/analytics', async (req, res) => {
     const yesterdayIST = yesterdayDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     const targetDate = date === 'today' ? todayIST : yesterdayIST;
     
-    // Fetch today's orders
-    const data = await shopifyRequest('orders.json?limit=250&status=any');
+    // Fetch Shopify orders (last 30 days to cover all ranges)
+    const shopifyData = await shopifyRequest('orders.json?limit=250&status=any');
     
-    const filteredOrders = data.orders.filter(order => {
+    // Filter today's orders for display
+    const todaysOrders = shopifyData.orders.filter(order => {
       const orderDateIST = new Date(order.created_at).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
       return orderDateIST === targetDate;
     });
     
-    // Fetch historical orders for predictive calculations
+    // Calculate date ranges for predictions
     const targetDateObj = new Date(targetDate);
     
-    // RTO: 14-7 days before target
-    const rtoEndDate = new Date(targetDateObj.getTime() - 7 * 86400000).toISOString().split('T')[0];
-    const rtoStartDate = new Date(targetDateObj.getTime() - 14 * 86400000).toISOString().split('T')[0];
+    // RTO: 14-7 days before target (pickup dates)
+    const rtoEnd = new Date(targetDateObj.getTime() - 7 * 86400000);
+    const rtoStart = new Date(targetDateObj.getTime() - 14 * 86400000);
+    const rtoEndStr = rtoEnd.toISOString().split('T')[0];
+    const rtoStartStr = rtoStart.toISOString().split('T')[0];
     
-    // Cancellation: 7-1 days before target  
-    const cancelEndDate = new Date(targetDateObj.getTime() - 1 * 86400000).toISOString().split('T')[0];
-    const cancelStartDate = new Date(targetDateObj.getTime() - 7 * 86400000).toISOString().split('T')[0];
+    // Cancel: 7-1 days before target (created dates)
+    const cancelEnd = new Date(targetDateObj.getTime() - 1 * 86400000);
+    const cancelStart = new Date(targetDateObj.getTime() - 7 * 86400000);
+    const cancelEndStr = cancelEnd.toISOString().split('T')[0];
+    const cancelStartStr = cancelStart.toISOString().split('T')[0];
     
-    const [adSpendByProduct, currentShiprocketStatuses, rtoShiprocketOrders, cancelShiprocketOrders] = await Promise.all([
+    // Fetch Shiprocket orders for both ranges (fetch wider range to cover both)
+    const shiprocketFetchStart = new Date(targetDateObj.getTime() - 21 * 86400000).toISOString().split('T')[0];
+    const shiprocketFetchEnd = targetDate;
+    
+    const [adSpendByProduct, currentStatuses, historicalShiprocketOrders] = await Promise.all([
       fetchMetaAdSpend(targetDate, targetDate),
-      fetchShiprocketStatuses(),
-      fetchShiprocketOrdersForDateRange(rtoStartDate, rtoEndDate),
-      fetchShiprocketOrdersForDateRange(cancelStartDate, cancelEndDate)
+      fetchCurrentShiprocketStatuses(),
+      fetchShiprocketOrders(shiprocketFetchStart, shiprocketFetchEnd)
     ]);
     
-    // Calculate predictive rates
+    // Build Shiprocket lookup map
+    const shiprocketMap = {};
+    historicalShiprocketOrders.forEach(order => {
+      shiprocketMap[order.channel_order_id] = {
+        status: order.shipments?.[0]?.status,
+        mainStatus: String(order.status || '').toLowerCase(),
+        pickupTimestamp: order.shipments?.[0]?.pickedup_timestamp
+      };
+    });
+    
+    // Calculate predictive rates by product
     const predictiveRates = calculatePredictiveRates(
-      data.orders,
-      rtoShiprocketOrders,
-      cancelShiprocketOrders,
-      rtoStartDate,
-      rtoEndDate,
-      cancelStartDate,
-      cancelEndDate
+      shopifyData.orders,
+      shiprocketMap,
+      rtoStartStr,
+      rtoEndStr,
+      cancelStartStr,
+      cancelEndStr
     );
     
-    const analytics = processOrders(filteredOrders, adSpendByProduct, currentShiprocketStatuses, predictiveRates);
+    const analytics = processOrders(todaysOrders, adSpendByProduct, currentStatuses, predictiveRates);
     
     res.json({ success: true, date, targetDate, analytics });
   } catch (error) {
@@ -307,39 +318,13 @@ app.get('/api/analytics', async (req, res) => {
   }
 });
 
-function calculatePredictiveRates(allShopifyOrders, rtoShiprocketOrders, cancelShiprocketOrders, rtoStart, rtoEnd, cancelStart, cancelEnd) {
+function calculatePredictiveRates(allShopifyOrders, shiprocketMap, rtoStart, rtoEnd, cancelStart, cancelEnd) {
   const productRates = {};
   
-  // Build lookup maps
-  const rtoShiprocketMap = {};
-  rtoShiprocketOrders.forEach(order => {
-    const orderNumber = order.channel_order_id;
-    const status = order.shipments?.[0]?.status;
-    const pickedUpDate = order.shipments?.[0]?.pickedup_timestamp;
-    
-    rtoShiprocketMap[orderNumber] = {
-      status,
-      pickedUpDate,
-      isDelivered: status === 6 || status === 7
-    };
-  });
-  
-  const cancelShiprocketMap = {};
-  cancelShiprocketOrders.forEach(order => {
-    const orderNumber = order.channel_order_id;
-    const status = order.shipments?.[0]?.status;
-    const mainStatus = String(order.status || '').toLowerCase();
-    
-    cancelShiprocketMap[orderNumber] = {
-      status,
-      isCancelled: mainStatus === 'canceled' || mainStatus === 'cancelled' || status === 8
-    };
-  });
-  
-  // Process Shopify orders
   allShopifyOrders.forEach(order => {
+    const orderNum = order.name?.replace('#', '');
     const orderCreatedIST = new Date(order.created_at).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-    const orderNumber = order.name?.replace('#', '') || order.order_number;
+    const shiprocket = shiprocketMap[orderNum];
     
     const isCOD = order.payment_gateway_names?.some(gw => 
       gw.toLowerCase().includes('cod') || gw.toLowerCase().includes('cash on delivery')
@@ -357,26 +342,34 @@ function calculatePredictiveRates(allShopifyOrders, rtoShiprocketOrders, cancelS
       };
     }
     
-    // RTO calculation (only COD orders picked up 14-7 days ago)
-    if (isCOD) {
-      const rtoData = rtoShiprocketMap[orderNumber];
-      if (rtoData && rtoData.pickedUpDate && rtoData.pickedUpDate !== '0000-00-00 00:00:00' && rtoData.pickedUpDate !== null) {
-        const pickupDateStr = rtoData.pickedUpDate.split(' ')[0]; // Extract YYYY-MM-DD
-        if (pickupDateStr >= rtoStart && pickupDateStr <= rtoEnd) {
-          productRates[attributedProduct].rtoTotal++;
-          if (!rtoData.isDelivered) {
-            productRates[attributedProduct].rtoNotDelivered++;
-          }
+    // RTO calculation (only COD, pickup date 14-7 days ago)
+    if (isCOD && shiprocket && shiprocket.pickupTimestamp && 
+        shiprocket.pickupTimestamp !== '0000-00-00 00:00:00' && 
+        shiprocket.pickupTimestamp !== null) {
+      
+      const pickupDate = shiprocket.pickupTimestamp.split(' ')[0]; // YYYY-MM-DD
+      
+      if (pickupDate >= rtoStart && pickupDate <= rtoEnd) {
+        productRates[attributedProduct].rtoTotal++;
+        
+        const isDelivered = shiprocket.status === 6 || shiprocket.status === 7;
+        if (!isDelivered) {
+          productRates[attributedProduct].rtoNotDelivered++;
         }
       }
     }
     
-    // Cancellation calculation (all orders created 7-1 days ago)
+    // Cancellation calculation (all orders, created 7-1 days ago)
     if (orderCreatedIST >= cancelStart && orderCreatedIST <= cancelEnd) {
       productRates[attributedProduct].cancelTotal++;
-      const cancelData = cancelShiprocketMap[orderNumber];
-      if (cancelData && cancelData.isCancelled) {
-        productRates[attributedProduct].cancelCancelled++;
+      
+      if (shiprocket) {
+        const isCancelled = shiprocket.mainStatus === 'canceled' || 
+                           shiprocket.mainStatus === 'cancelled' || 
+                           shiprocket.status === 8;
+        if (isCancelled) {
+          productRates[attributedProduct].cancelCancelled++;
+        }
       }
     }
   });
@@ -539,303 +532,6 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses, predictiveR
     skus
   };
 }
-
-app.get('/api/debug/predictive', async (req, res) => {
-  try {
-    const targetDate = '2026-01-13'; // Yesterday
-    const targetDateObj = new Date(targetDate);
-    
-    // RTO: 14-7 days before target
-    const rtoEndDate = new Date(targetDateObj.getTime() - 7 * 86400000).toISOString().split('T')[0];
-    const rtoStartDate = new Date(targetDateObj.getTime() - 14 * 86400000).toISOString().split('T')[0];
-    
-    // Cancellation: 7-1 days before target  
-    const cancelEndDate = new Date(targetDateObj.getTime() - 1 * 86400000).toISOString().split('T')[0];
-    const cancelStartDate = new Date(targetDateObj.getTime() - 7 * 86400000).toISOString().split('T')[0];
-    
-    // Fetch data
-    const allShopifyOrders = await shopifyRequest('orders.json?limit=250&status=any');
-    const rtoShiprocketOrders = await fetchShiprocketOrdersForDateRange(rtoStartDate, rtoEndDate);
-    const cancelShiprocketOrders = await fetchShiprocketOrdersForDateRange(cancelStartDate, cancelEndDate);
-    
-    // Show what we got
-    const debug = {
-      dateRanges: {
-        rto: `${rtoStartDate} to ${rtoEndDate}`,
-        cancel: `${cancelStartDate} to ${cancelEndDate}`
-      },
-      counts: {
-        shopifyOrders: allShopifyOrders.orders.length,
-        rtoShiprocketOrders: rtoShiprocketOrders.length,
-        cancelShiprocketOrders: cancelShiprocketOrders.length
-      },
-      sampleShopifyOrder: allShopifyOrders.orders[0] ? {
-        name: allShopifyOrders.orders[0].name,
-        created_at: allShopifyOrders.orders[0].created_at,
-        product: allShopifyOrders.orders[0].line_items?.[0]?.name
-      } : null,
-      sampleRTOShiprocketOrder: rtoShiprocketOrders[0] ? {
-        channel_order_id: rtoShiprocketOrders[0].channel_order_id,
-        status: rtoShiprocketOrders[0].shipments?.[0]?.status,
-        pickedup_timestamp: rtoShiprocketOrders[0].shipments?.[0]?.pickedup_timestamp
-      } : null,
-      sampleCancelShiprocketOrder: cancelShiprocketOrders[0] ? {
-        channel_order_id: cancelShiprocketOrders[0].channel_order_id,
-        status: cancelShiprocketOrders[0].status,
-        shipment_status: cancelShiprocketOrders[0].shipments?.[0]?.status
-      } : null
-    };
-    
-    res.json(debug);
-  } catch (error) {
-    res.json({ error: error.message });
-  }
-});
-
-app.get('/api/debug/find-pickups', async (req, res) => {
-  try {
-    const token = await getShiprocketToken();
-    if (!token) return res.json({ error: 'No token' });
-    
-    // Fetch 250 orders without date filter
-    const response = await axios.get('https://apiv2.shiprocket.in/v1/external/orders', {
-      headers: { 'Authorization': `Bearer ${token}` },
-      params: { per_page: 250 }
-    });
-    
-    const ordersWithPickup = [];
-    const ordersDelivered = [];
-    const ordersRTO = [];
-    
-    response.data.data.forEach(order => {
-      const pickupDate = order.shipments?.[0]?.pickedup_timestamp;
-      const status = order.shipments?.[0]?.status;
-      const deliveredDate = order.shipments?.[0]?.delivered_date;
-      
-      if (pickupDate && pickupDate !== '0000-00-00 00:00:00' && pickupDate !== null) {
-        ordersWithPickup.push({
-          channel_order_id: order.channel_order_id,
-          pickedup_timestamp: pickupDate,
-          status: status,
-          delivered_date: deliveredDate
-        });
-      }
-      
-      if (status === 6 || status === 7) {
-        ordersDelivered.push({
-          channel_order_id: order.channel_order_id,
-          status: status,
-          pickedup_timestamp: pickupDate,
-          delivered_date: deliveredDate
-        });
-      }
-      
-      if ([9, 10, 12, 13, 14, 15, 16, 17].includes(status)) {
-        ordersRTO.push({
-          channel_order_id: order.channel_order_id,
-          status: status,
-          pickedup_timestamp: pickupDate
-        });
-      }
-    });
-    
-    res.json({
-      totalOrders: response.data.data.length,
-      ordersWithPickupDate: ordersWithPickup.length,
-      ordersDelivered: ordersDelivered.length,
-      ordersRTO: ordersRTO.length,
-      samplePickup: ordersWithPickup.slice(0, 3),
-      sampleDelivered: ordersDelivered.slice(0, 3),
-      sampleRTO: ordersRTO.slice(0, 3)
-    });
-  } catch (error) {
-    res.json({ error: error.message });
-  }
-});
-
-
-app.get('/api/debug/match-orders', async (req, res) => {
-  try {
-    // Get Shopify orders from last 30 days
-    const shopifyData = await shopifyRequest('orders.json?limit=250&status=any');
-    
-    // Get Shiprocket orders (no date filter, just recent batch)
-    const token = await getShiprocketToken();
-    const shiprocketResponse = await axios.get('https://apiv2.shiprocket.in/v1/external/orders', {
-      headers: { 'Authorization': `Bearer ${token}` },
-      params: { per_page: 250 }
-    });
-    
-    // Build Shiprocket lookup map
-    const shiprocketMap = {};
-    shiprocketResponse.data.data.forEach(order => {
-      shiprocketMap[order.channel_order_id] = {
-        status: order.shipments?.[0]?.status,
-        pickedup_timestamp: order.shipments?.[0]?.pickedup_timestamp,
-        delivered_date: order.shipments?.[0]?.delivered_date
-      };
-    });
-    
-    // Try to match
-    const matched = [];
-    const unmatched = [];
-    
-    shopifyData.orders.slice(0, 10).forEach(order => {
-      const shopifyOrderNum = order.name?.replace('#', '');
-      const shiprocketData = shiprocketMap[shopifyOrderNum];
-      
-      if (shiprocketData) {
-        matched.push({
-          shopify_order: shopifyOrderNum,
-          shopify_created: order.created_at,
-          shiprocket_status: shiprocketData.status,
-          shiprocket_pickup: shiprocketData.pickedup_timestamp
-        });
-      } else {
-        unmatched.push(shopifyOrderNum);
-      }
-    });
-    
-    res.json({
-      totalShopify: shopifyData.orders.length,
-      totalShiprocket: shiprocketResponse.data.data.length,
-      matchedSample: matched,
-      unmatchedSample: unmatched,
-      shiprocketOrderIdsSample: Object.keys(shiprocketMap).slice(0, 10)
-    });
-  } catch (error) {
-    res.json({ error: error.message });
-  }
-});
-
-app.get('/api/debug/correct-logic', async (req, res) => {
-  try {
-    const targetDate = '2026-01-13';
-    const targetDateObj = new Date(targetDate);
-    
-    // RTO range: 14-7 days back (pickup dates)
-    const rtoEnd = new Date(targetDateObj.getTime() - 7 * 86400000);
-    const rtoStart = new Date(targetDateObj.getTime() - 14 * 86400000);
-    const rtoEndStr = rtoEnd.toISOString().split('T')[0];
-    const rtoStartStr = rtoStart.toISOString().split('T')[0];
-    
-    // Cancel range: 7-1 days back (creation dates)
-    const cancelEnd = new Date(targetDateObj.getTime() - 1 * 86400000);
-    const cancelStart = new Date(targetDateObj.getTime() - 7 * 86400000);
-    const cancelEndStr = cancelEnd.toISOString().split('T')[0];
-    const cancelStartStr = cancelStart.toISOString().split('T')[0];
-    
-    // Get Shopify orders from Dec 15 to Jan 13 (covers both ranges)
-    const shopifyData = await shopifyRequest('orders.json?limit=250&status=any');
-    
-    // Get Shiprocket orders (large batch)
-    const token = await getShiprocketToken();
-    const shiprocketResponse = await axios.get('https://apiv2.shiprocket.in/v1/external/orders', {
-      headers: { 'Authorization': `Bearer ${token}` },
-      params: { per_page: 250 }
-    });
-    
-    // Build Shiprocket lookup
-    const shiprocketMap = {};
-    shiprocketResponse.data.data.forEach(order => {
-      shiprocketMap[order.channel_order_id] = {
-        status: order.shipments?.[0]?.status,
-        pickupTimestamp: order.shipments?.[0]?.pickedup_timestamp,
-        mainStatus: order.status
-      };
-    });
-    
-    // Filter for RTO calculation (picked up Dec 30 - Jan 6)
-    const rtoOrders = [];
-    const rtoDelivered = [];
-    
-    shopifyData.orders.forEach(order => {
-      const orderNum = order.name?.replace('#', '');
-      const shiprocket = shiprocketMap[orderNum];
-      
-      if (shiprocket && shiprocket.pickupTimestamp && 
-          shiprocket.pickupTimestamp !== '0000-00-00 00:00:00' && 
-          shiprocket.pickupTimestamp !== null) {
-        
-        const pickupDate = shiprocket.pickupTimestamp.split(' ')[0]; // Extract YYYY-MM-DD
-        
-        if (pickupDate >= rtoStartStr && pickupDate <= rtoEndStr) {
-          const isCOD = order.payment_gateway_names?.some(gw => 
-            gw.toLowerCase().includes('cod') || gw.toLowerCase().includes('cash on delivery')
-          );
-          
-          if (isCOD) {
-            rtoOrders.push({
-              orderNum,
-              pickupDate,
-              status: shiprocket.status,
-              isDelivered: shiprocket.status === 6 || shiprocket.status === 7
-            });
-            
-            if (shiprocket.status === 6 || shiprocket.status === 7) {
-              rtoDelivered.push(orderNum);
-            }
-          }
-        }
-      }
-    });
-    
-    // Filter for Cancel calculation (created Jan 6-12)
-    const cancelOrders = [];
-    const cancelCancelled = [];
-    
-    shopifyData.orders.forEach(order => {
-      const createdIST = new Date(order.created_at).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-      
-      if (createdIST >= cancelStartStr && createdIST <= cancelEndStr) {
-        const orderNum = order.name?.replace('#', '');
-        const shiprocket = shiprocketMap[orderNum];
-        
-        const isCancelled = shiprocket && (
-          shiprocket.mainStatus?.toLowerCase() === 'canceled' ||
-          shiprocket.mainStatus?.toLowerCase() === 'cancelled' ||
-          shiprocket.status === 8
-        );
-        
-        cancelOrders.push({
-          orderNum,
-          createdDate: createdIST,
-          status: shiprocket?.status,
-          isCancelled
-        });
-        
-        if (isCancelled) {
-          cancelCancelled.push(orderNum);
-        }
-      }
-    });
-    
-    const rtoRate = rtoOrders.length > 0 ? ((rtoOrders.length - rtoDelivered.length) / rtoOrders.length * 100) : 0;
-    const cancelRate = cancelOrders.length > 0 ? (cancelCancelled.length / cancelOrders.length * 100) : 0;
-    
-    res.json({
-      dateRanges: {
-        rto: `${rtoStartStr} to ${rtoEndStr} (pickup dates)`,
-        cancel: `${cancelStartStr} to ${cancelEndStr} (created dates)`
-      },
-      rto: {
-        totalOrders: rtoOrders.length,
-        delivered: rtoDelivered.length,
-        notDelivered: rtoOrders.length - rtoDelivered.length,
-        rtoRate: rtoRate.toFixed(1) + '%',
-        sampleOrders: rtoOrders.slice(0, 5)
-      },
-      cancel: {
-        totalOrders: cancelOrders.length,
-        cancelled: cancelCancelled.length,
-        cancelRate: cancelRate.toFixed(1) + '%',
-        sampleOrders: cancelOrders.slice(0, 5)
-      }
-    });
-  } catch (error) {
-    res.json({ error: error.message, stack: error.stack });
-  }
-});
 
 app.listen(PORT, () => {
   console.log('Server running on port ' + PORT);
