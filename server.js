@@ -507,6 +507,32 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses, predictiveR
   };
 }
 
+app.get('/api/debug/shiprocket', async (req, res) => {
+  const token = await getShiprocketToken();
+  if (!token) return res.json({ error: 'No token' });
+  
+  try {
+    const response = await axios.get('https://apiv2.shiprocket.in/v1/external/orders', {
+      headers: { 'Authorization': `Bearer ${token}` },
+      params: { per_page: 10 }
+    });
+    
+    // Return first 3 orders to see structure
+    const sample = response.data.data.slice(0, 3).map(order => ({
+      channel_order_id: order.channel_order_id,
+      status: order.status,
+      pickup_scheduled_date: order.pickup_scheduled_date,
+      shipment_pickup: order.shipments?.[0]?.pickup_scheduled_date,
+      shipment_status: order.shipments?.[0]?.status,
+      all_shipment_fields: Object.keys(order.shipments?.[0] || {})
+    }));
+    
+    res.json({ sample });
+  } catch (error) {
+    res.json({ error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log('Server running on port ' + PORT);
 });
