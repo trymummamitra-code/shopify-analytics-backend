@@ -22,7 +22,7 @@ app.use(cors());
 app.use(express.json());
 
 app.get('/', (req, res) => {
-  res.send('<h1>Shopify Backend</h1><p>Status: ' + (accessToken ? 'Connected' : 'Not Connected') + '</p>');
+  res.send('<h1>Backend Running</h1>');
 });
 
 app.get('/auth/shopify', (req, res) => {
@@ -58,6 +58,7 @@ const shopifyRequest = async (endpoint) => {
 
 const fetchMetaAdSpend = async (startDate, endDate) => {
   if (!META_ACCESS_TOKEN || !META_AD_ACCOUNT_ID) {
+    console.log('Meta credentials missing');
     return {};
   }
   
@@ -76,12 +77,14 @@ const fetchMetaAdSpend = async (startDate, endDate) => {
     const campaigns = response.data.data || [];
     const adSpendByProduct = {};
     
+    console.log('=== META CAMPAIGNS ===');
     campaigns.forEach(campaign => {
       if (campaign.insights && campaign.insights.data && campaign.insights.data.length > 0) {
         const spend = parseFloat(campaign.insights.data[0].spend || 0);
         const campaignName = campaign.name;
-        
         const productName = campaignName.split('|')[0].trim().toLowerCase();
+        
+        console.log(`Campaign: "${campaignName}" -> Extract: "${productName}" -> Spend: ₹${spend}`);
         
         if (!adSpendByProduct[productName]) {
           adSpendByProduct[productName] = 0;
@@ -89,6 +92,7 @@ const fetchMetaAdSpend = async (startDate, endDate) => {
         adSpendByProduct[productName] += spend;
       }
     });
+    console.log('Final mapping:', adSpendByProduct);
     
     return adSpendByProduct;
   } catch (error) {
@@ -96,15 +100,6 @@ const fetchMetaAdSpend = async (startDate, endDate) => {
     return {};
   }
 };
-
-app.get('/api/orders', async (req, res) => {
-  try {
-    const data = await shopifyRequest('orders.json?limit=250&status=any');
-    res.json({ success: true, orders: data.orders, count: data.orders.length });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
 
 app.get('/api/analytics', async (req, res) => {
   try {
@@ -123,15 +118,9 @@ app.get('/api/analytics', async (req, res) => {
     });
     
     const adSpendByProduct = await fetchMetaAdSpend(targetDate, targetDate);
-    
     const analytics = processOrders(filteredOrders, adSpendByProduct);
     
-    res.json({
-      success: true,
-      date,
-      targetDate,
-      analytics
-    });
+    res.json({ success: true, date, targetDate, analytics });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -179,8 +168,7 @@ function processOrders(orders, adSpendByProduct) {
           codOrders: 0,
           prepaidOrders: 0,
           codOrderIds: new Set(),
-          prepaidOrderIds: new Set(),
-          adSpend: 0
+          prepaidOrderIds: new Set()
         };
       }
       
@@ -206,15 +194,20 @@ function processOrders(orders, adSpendByProduct) {
     });
   });
   
+  console.log('=== MATCHING PRODUCTS TO CAMPAIGNS ===');
   const skus = Object.values(skuData).map(sku => {
     const productNameLower = sku.productName.toLowerCase();
-    
-    // Match campaign names that are prefixes of product names
     let adSpend = 0;
+    
     for (const [campaignName, spend] of Object.entries(adSpendByProduct)) {
-      if (productNameLower.startsWith(campaignName.toLowerCase())) {
+      if (productNameLower.startsWith(campaignName)) {
+        console.log(`✓ Product "${sku.productName}" matches campaign "${campaignName}" -> ₹${spend}`);
         adSpend += spend;
       }
+    }
+    
+    if (adSpend === 0) {
+      console.log(`✗ Product "${sku.productName}" - NO MATCH`);
     }
     
     return {
@@ -237,31 +230,6 @@ function processOrders(orders, adSpendByProduct) {
     skus
   };
 }
-
-app.get('/api/debug-adspend', async (req, res) => {
-  try {
-    const { date = 'yesterday' } = req.query;
-    const now = new Date();
-    const todayIST = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-    const yesterdayDate = new Date(now.getTime() - 86400000);
-    const yesterdayIST = yesterdayDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-    const targetDate = date === 'today' ? todayIST : yesterdayIST;
-    
-    const adSpendByProduct = await fetchMetaAdSpend(targetDate, targetDate);
-    
-    res.json({
-      success: true,
-      targetDate,
-      adSpendByProduct
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log('Server running on port ' + PORT);
-});
 
 app.listen(PORT, () => {
   console.log('Server running on port ' + PORT);
