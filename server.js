@@ -507,69 +507,6 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses, predictiveR
   };
 }
 
-app.get('/api/debug/shiprocket-full', async (req, res) => {
-  const token = await getShiprocketToken();
-  if (!token) return res.json({ error: 'No token' });
-  
-  try {
-    const response = await axios.get('https://apiv2.shiprocket.in/v1/external/orders', {
-      headers: { 'Authorization': `Bearer ${token}` },
-      params: { per_page: 250 }
-    });
-    
-    const statusCounts = {};
-    const dateRange = { oldest: null, newest: null };
-    const deliveredSample = [];
-    const rtoSample = [];
-    
-    response.data.data.forEach(order => {
-      const status = order.shipments?.[0]?.status;
-      const pickedUpDate = order.shipments?.[0]?.pickedup_timestamp;
-      const deliveredDate = order.shipments?.[0]?.delivered_date;
-      const rtoDate = order.shipments?.[0]?.rto_delivered_date;
-      
-      const key = `ship:${status}`;
-      statusCounts[key] = (statusCounts[key] || 0) + 1;
-      
-      // Track date range
-      if (pickedUpDate && pickedUpDate !== '0000-00-00 00:00:00' && pickedUpDate !== null) {
-        if (!dateRange.oldest || pickedUpDate < dateRange.oldest) dateRange.oldest = pickedUpDate;
-        if (!dateRange.newest || pickedUpDate > dateRange.newest) dateRange.newest = pickedUpDate;
-      }
-      
-      // Sample delivered orders
-      if (deliveredDate && deliveredDate !== '0000-00-00 00:00:00' && deliveredSample.length < 3) {
-        deliveredSample.push({
-          channel_order_id: order.channel_order_id,
-          status,
-          pickedup_timestamp: pickedUpDate,
-          delivered_date: deliveredDate
-        });
-      }
-      
-      // Sample RTO orders
-      if (rtoDate && rtoDate !== '0000-00-00 00:00:00' && rtoSample.length < 3) {
-        rtoSample.push({
-          channel_order_id: order.channel_order_id,
-          status,
-          pickedup_timestamp: pickedUpDate,
-          rto_delivered_date: rtoDate
-        });
-      }
-    });
-    
-    res.json({ 
-      totalOrders: response.data.data.length,
-      statusCounts,
-      dateRange,
-      deliveredSample,
-      rtoSample
-    });
-  } catch (error) {
-    res.json({ error: error.message });
-  }
-});
-
 app.listen(PORT, () => {
   console.log('Server running on port ' + PORT);
 });
