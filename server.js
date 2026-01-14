@@ -653,6 +653,61 @@ app.get('/api/debug/find-pickups', async (req, res) => {
   }
 });
 
+
+app.get('/api/debug/match-orders', async (req, res) => {
+  try {
+    // Get Shopify orders from last 30 days
+    const shopifyData = await shopifyRequest('orders.json?limit=250&status=any');
+    
+    // Get Shiprocket orders (no date filter, just recent batch)
+    const token = await getShiprocketToken();
+    const shiprocketResponse = await axios.get('https://apiv2.shiprocket.in/v1/external/orders', {
+      headers: { 'Authorization': `Bearer ${token}` },
+      params: { per_page: 250 }
+    });
+    
+    // Build Shiprocket lookup map
+    const shiprocketMap = {};
+    shiprocketResponse.data.data.forEach(order => {
+      shiprocketMap[order.channel_order_id] = {
+        status: order.shipments?.[0]?.status,
+        pickedup_timestamp: order.shipments?.[0]?.pickedup_timestamp,
+        delivered_date: order.shipments?.[0]?.delivered_date
+      };
+    });
+    
+    // Try to match
+    const matched = [];
+    const unmatched = [];
+    
+    shopifyData.orders.slice(0, 10).forEach(order => {
+      const shopifyOrderNum = order.name?.replace('#', '');
+      const shiprocketData = shiprocketMap[shopifyOrderNum];
+      
+      if (shiprocketData) {
+        matched.push({
+          shopify_order: shopifyOrderNum,
+          shopify_created: order.created_at,
+          shiprocket_status: shiprocketData.status,
+          shiprocket_pickup: shiprocketData.pickedup_timestamp
+        });
+      } else {
+        unmatched.push(shopifyOrderNum);
+      }
+    });
+    
+    res.json({
+      totalShopify: shopifyData.orders.length,
+      totalShiprocket: shiprocketResponse.data.data.length,
+      matchedSample: matched,
+      unmatchedSample: unmatched,
+      shiprocketOrderIdsSample: Object.keys(shiprocketMap).slice(0, 10)
+    });
+  } catch (error) {
+    res.json({ error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log('Server running on port ' + PORT);
 });
