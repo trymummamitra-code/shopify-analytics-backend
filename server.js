@@ -207,8 +207,15 @@ function processOrders(orders, adSpendByProduct) {
   });
   
   const skus = Object.values(skuData).map(sku => {
-    const productNameLower = sku.productName.split('™')[0].split('–')[0].trim().toLowerCase();
-    const adSpend = adSpendByProduct[productNameLower] || 0;
+    const productNameLower = sku.productName.toLowerCase();
+    
+    // Match campaign names that are prefixes of product names
+    let adSpend = 0;
+    for (const [campaignName, spend] of Object.entries(adSpendByProduct)) {
+      if (productNameLower.startsWith(campaignName.toLowerCase())) {
+        adSpend += spend;
+      }
+    }
     
     return {
       sku: sku.sku,
