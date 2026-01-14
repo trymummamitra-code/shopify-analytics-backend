@@ -87,425 +87,72 @@ const getShiprocketToken = async () => {
   }
 };
 
-const fetchShiprocketOrders = async () => {
+app.get('/api/debug/shiprocket-dates', async (req, res) => {
   const token = await getShiprocketToken();
-  if (!token) return {};
+  if (!token) return res.json({ error: 'No token' });
   
   try {
-    const response = await axios.get('https://apiv2.shiprocket.in/v1/external/orders', {
-      headers: { 'Authorization': `Bearer ${token}` },
-      params: { per_page: 250 }
-    });
+    const today = new Date();
+    const date14DaysAgo = new Date(today.getTime() - 14 * 86400000);
+    const date7DaysAgo = new Date(today.getTime() - 7 * 86400000);
     
-    const orders = response.data.data || [];
-    const orderStatusMap = {};
+    const startDate = date14DaysAgo.toISOString().split('T')[0];
+    const endDate = date7DaysAgo.toISOString().split('T')[0];
     
-    orders.forEach(order => {
-      const orderNumber = order.channel_order_id;
-      const status = String(order.status || '').toLowerCase();
-      const shipmentStatus = String(order.shipments?.[0]?.status || '').toLowerCase();
-      const pickupDate = order.pickup_scheduled_date || order.shipments?.[0]?.pickup_scheduled_date;
-      
-      let deliveryStatus = 'pending';
-      
-      if (status === 'cancelled' || status === 'canceled') {
-        deliveryStatus = 'cancelled';
-      } else if (
-        shipmentStatus.includes('rto initiated') || 
-        shipmentStatus.includes('rto in transit') ||
-        shipmentStatus.includes('rto ndr') ||
-        shipmentStatus.includes('rto ofd') ||
-        shipmentStatus.includes('rto delivered') ||
-        shipmentStatus.includes('rto acknowledged') ||
-        shipmentStatus.includes('rto lock') ||
-        shipmentStatus.includes('rto requested') ||
-        shipmentStatus.includes('rto') ||
-        status.includes('rto')
-      ) {
-        deliveryStatus = 'rto';
-      } else if (shipmentStatus.includes('delivered')) {
-        deliveryStatus = 'delivered';
-      } else if (shipmentStatus.includes('transit') || shipmentStatus.includes('shipped')) {
-        deliveryStatus = 'in_transit';
-      }
-      
-      orderStatusMap[orderNumber] = {
-        status: deliveryStatus,
-        pickupDate: pickupDate
-      };
-    });
+    const tests = [];
     
-    console.log(`✓ Fetched ${orders.length} Shiprocket orders`);
-    return orderStatusMap;
-  } catch (error) {
-    console.error('Shiprocket orders error:', error.response?.data || error.message);
-    return {};
-  }
-};
-
-const fetchMetaAdSpend = async (startDate, endDate) => {
-  if (!META_ACCESS_TOKEN || !META_AD_ACCOUNT_ID) {
-    return {};
-  }
-  
-  try {
-    const response = await axios.get(
-      `https://graph.facebook.com/v21.0/act_${META_AD_ACCOUNT_ID}/campaigns`,
-      {
-        params: {
-          access_token: META_ACCESS_TOKEN,
-          fields: 'name,insights.date_preset(maximum).time_range({"since":"' + startDate + '","until":"' + endDate + '"}){spend,campaign_name}',
-          limit: 500
+    try {
+      const test1 = await axios.get('https://apiv2.shiprocket.in/v1/external/orders', {
+        headers: { 'Authorization': `Bearer ${token}` },
+        params: { 
+          per_page: 50,
+          filter_by_date: '1',
+          from_date: startDate,
+          to_date: endDate
         }
-      }
-    );
-    
-    const campaigns = response.data.data || [];
-    const adSpendByProduct = {};
-    
-    campaigns.forEach(campaign => {
-      if (campaign.insights && campaign.insights.data && campaign.insights.data.length > 0) {
-        const spend = parseFloat(campaign.insights.data[0].spend || 0);
-        const campaignName = campaign.name;
-        const productName = campaignName.split('|')[0].trim().toLowerCase();
-        
-        if (!adSpendByProduct[productName]) {
-          adSpendByProduct[productName] = 0;
-        }
-        adSpendByProduct[productName] += spend;
-      }
-    });
-    
-    return adSpendByProduct;
-  } catch (error) {
-    console.error('Meta API error:', error.response?.data || error.message);
-    return {};
-  }
-};
-
-const extractProductFromUTM = (landingPageUrl) => {
-  if (!landingPageUrl) return null;
-  
-  try {
-    const url = new URL(landingPageUrl);
-    const utmCampaign = url.searchParams.get('utm_campaign');
-    
-    if (utmCampaign) {
-      const productName = utmCampaign.split('_')[0].trim().toLowerCase();
-      return productName;
+      });
+      tests.push({ name: 'filter_by_date', success: true, count: test1.data.data.length });
+    } catch (e) {
+      tests.push({ name: 'filter_by_date', success: false, error: e.response?.data?.message || e.message });
     }
-  } catch (e) {
-    return null;
-  }
-  
-  return null;
-};
-
-app.get('/api/analytics', async (req, res) => {
-  try {
-    const { date = 'today' } = req.query;
     
-    const now = new Date();
-    const todayIST = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-    const yesterdayDate = new Date(now.getTime() - 86400000);
-    const yesterdayIST = yesterdayDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-    const targetDate = date === 'today' ? todayIST : yesterdayIST;
+    try {
+      const test2 = await axios.get('https://apiv2.shiprocket.in/v1/external/orders', {
+        headers: { 'Authorization': `Bearer ${token}` },
+        params: { 
+          per_page: 50,
+          created_from: startDate,
+          created_to: endDate
+        }
+      });
+      tests.push({ name: 'created_from/to', success: true, count: test2.data.data.length });
+    } catch (e) {
+      tests.push({ name: 'created_from/to', success: false, error: e.response?.data?.message || e.message });
+    }
     
-    // Fetch last 14 days for historical analysis
-    const data = await shopifyRequest('orders.json?limit=250&status=any');
+    try {
+      const test3 = await axios.get('https://apiv2.shiprocket.in/v1/external/orders', {
+        headers: { 'Authorization': `Bearer ${token}` },
+        params: { 
+          per_page: 50,
+          pickup_from: startDate,
+          pickup_to: endDate
+        }
+      });
+      tests.push({ name: 'pickup_from/to', success: true, count: test3.data.data.length });
+    } catch (e) {
+      tests.push({ name: 'pickup_from/to', success: false, error: e.response?.data?.message || e.message });
+    }
     
-    const filteredOrders = data.orders.filter(order => {
-      const orderDateIST = new Date(order.created_at).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-      return orderDateIST === targetDate;
+    res.json({
+      dateRange: `${startDate} to ${endDate}`,
+      tests
     });
     
-    const [adSpendByProduct, shiprocketStatuses] = await Promise.all([
-      fetchMetaAdSpend(targetDate, targetDate),
-      fetchShiprocketOrders()
-    ]);
-    
-    // Calculate predictive rates from historical data
-    const targetDateObj = new Date(targetDate);
-    const predictiveRates = calculatePredictiveRates(data.orders, shiprocketStatuses, targetDateObj);
-    
-    const analytics = processOrders(filteredOrders, adSpendByProduct, shiprocketStatuses, predictiveRates);
-    
-    res.json({ success: true, date, targetDate, analytics });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    res.json({ error: error.message });
   }
 });
-
-function calculatePredictiveRates(allOrders, shiprocketStatuses, targetDate) {
-  const productRates = {};
-  
-  // RTO: 14-7 days before target (pickup date range)
-  const rtoEndDate = new Date(targetDate.getTime() - 7 * 86400000);
-  const rtoStartDate = new Date(targetDate.getTime() - 14 * 86400000);
-  
-  // Cancellation: 7-1 days before target (created date range)
-  const cancelEndDate = new Date(targetDate.getTime() - 1 * 86400000);
-  const cancelStartDate = new Date(targetDate.getTime() - 7 * 86400000);
-  
-  allOrders.forEach(order => {
-    const orderCreatedIST = new Date(order.created_at).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-    const orderCreatedDate = new Date(orderCreatedIST);
-    const orderNumber = order.name?.replace('#', '') || order.order_number;
-    const shiprocketData = shiprocketStatuses[orderNumber];
-    
-    const isCOD = order.payment_gateway_names?.some(gw => 
-      gw.toLowerCase().includes('cod') || gw.toLowerCase().includes('cash on delivery')
-    );
-    
-    // Get attributed product
-    const landingPageUrl = order.landing_site;
-    const utmProduct = extractProductFromUTM(landingPageUrl);
-    let attributedProduct = null;
-    
-    if (utmProduct) {
-      attributedProduct = utmProduct;
-    } else {
-      const lineItems = order.line_items || [];
-      if (lineItems.length === 1) {
-        const productName = lineItems[0].name.toLowerCase();
-        attributedProduct = productName.split('™')[0].split('–')[0].trim();
-      } else if (lineItems.length > 1) {
-        const revenueMap = {};
-        lineItems.forEach(item => {
-          const productName = item.name.toLowerCase();
-          const productKey = productName.split('™')[0].split('–')[0].trim();
-          const itemRevenue = parseFloat(item.price) * item.quantity;
-          revenueMap[productKey] = (revenueMap[productKey] || 0) + itemRevenue;
-        });
-        const sorted = Object.entries(revenueMap).sort((a, b) => b[1] - a[1]);
-        if (sorted[0][1] / Object.values(revenueMap).reduce((a,b) => a+b, 0) > 0.5) {
-          attributedProduct = sorted[0][0];
-        }
-      }
-    }
-    
-    if (!attributedProduct) return;
-    
-    if (!productRates[attributedProduct]) {
-      productRates[attributedProduct] = {
-        rtoTotal: 0,
-        rtoNotDelivered: 0,
-        cancelTotal: 0,
-        cancelCancelled: 0
-      };
-    }
-    
-    // RTO calculation (only COD, pickup date 14-7 days ago)
-    if (isCOD && shiprocketData?.pickupDate) {
-      const pickupDateIST = new Date(shiprocketData.pickupDate).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-      const pickupDate = new Date(pickupDateIST);
-      
-      if (pickupDate >= rtoStartDate && pickupDate <= rtoEndDate) {
-        productRates[attributedProduct].rtoTotal++;
-        if (shiprocketData.status !== 'delivered') {
-          productRates[attributedProduct].rtoNotDelivered++;
-        }
-      }
-    }
-    
-    // Cancellation calculation (all orders, created 7-1 days ago)
-    if (orderCreatedDate >= cancelStartDate && orderCreatedDate <= cancelEndDate) {
-      productRates[attributedProduct].cancelTotal++;
-      if (shiprocketData?.status === 'cancelled') {
-        productRates[attributedProduct].cancelCancelled++;
-      }
-    }
-  });
-  
-  // Calculate percentages
-  const rates = {};
-  for (const [product, data] of Object.entries(productRates)) {
-    rates[product] = {
-      predictiveRTO: data.rtoTotal > 0 ? (data.rtoNotDelivered / data.rtoTotal * 100) : 0,
-      predictiveCancel: data.cancelTotal > 0 ? (data.cancelCancelled / data.cancelTotal * 100) : 0
-    };
-  }
-  
-  return rates;
-}
-
-function processOrders(orders, adSpendByProduct, shiprocketStatuses, predictiveRates) {
-  const skuData = {};
-  const productAttributionMap = {};
-  let codCount = 0;
-  let prepaidCount = 0;
-  let codRevenue = 0;
-  let prepaidRevenue = 0;
-  const seenOrders = new Set();
-  let manualReviewCount = 0;
-  
-  orders.forEach(order => {
-    const isCOD = order.payment_gateway_names?.some(gw => 
-      gw.toLowerCase().includes('cod') || gw.toLowerCase().includes('cash on delivery')
-    );
-    
-    const orderTotal = parseFloat(order.total_price || 0);
-    const orderNumber = order.name?.replace('#', '') || order.order_number;
-    const shiprocketData = shiprocketStatuses[orderNumber];
-    const shiprocketStatus = shiprocketData?.status || 'unknown';
-    
-    if (!seenOrders.has(order.id)) {
-      seenOrders.add(order.id);
-      if (isCOD) {
-        codCount++;
-        codRevenue += orderTotal;
-      } else {
-        prepaidCount++;
-        prepaidRevenue += orderTotal;
-      }
-    }
-    
-    // Attribution logic
-    let attributedProduct = null;
-    const landingPageUrl = order.landing_site;
-    const utmProduct = extractProductFromUTM(landingPageUrl);
-    
-    if (utmProduct) {
-      attributedProduct = utmProduct;
-    } else {
-      const lineItems = order.line_items || [];
-      
-      if (lineItems.length === 1) {
-        const productName = lineItems[0].name.toLowerCase();
-        const productKey = productName.split('™')[0].split('–')[0].trim();
-        attributedProduct = productKey;
-      } else if (lineItems.length > 1) {
-        const revenueMap = {};
-        lineItems.forEach(item => {
-          const productName = item.name.toLowerCase();
-          const productKey = productName.split('™')[0].split('–')[0].trim();
-          const itemRevenue = parseFloat(item.price) * item.quantity;
-          revenueMap[productKey] = (revenueMap[productKey] || 0) + itemRevenue;
-        });
-        
-        const sorted = Object.entries(revenueMap).sort((a, b) => b[1] - a[1]);
-        const topProduct = sorted[0];
-        const topRevenue = topProduct[1];
-        const totalRevenue = Object.values(revenueMap).reduce((a, b) => a + b, 0);
-        
-        if (topRevenue / totalRevenue > 0.5) {
-          attributedProduct = topProduct[0];
-        } else {
-          manualReviewCount++;
-        }
-      }
-    }
-    
-    if (attributedProduct) {
-      if (!productAttributionMap[attributedProduct]) {
-        productAttributionMap[attributedProduct] = { orders: 0, codOrders: 0 };
-      }
-      productAttributionMap[attributedProduct].orders++;
-      if (isCOD) productAttributionMap[attributedProduct].codOrders++;
-    }
-    
-    const itemsTotal = order.line_items?.reduce((sum, item) => 
-      sum + (parseFloat(item.price) * item.quantity), 0) || 1;
-    
-    order.line_items?.forEach(item => {
-      const sku = item.sku || item.variant_id || 'unknown';
-      
-      if (!skuData[sku]) {
-        skuData[sku] = {
-          sku,
-          productName: item.name,
-          codRevenue: 0,
-          prepaidRevenue: 0,
-          totalRevenue: 0,
-          codOrders: 0,
-          prepaidOrders: 0,
-          codOrderIds: new Set(),
-          prepaidOrderIds: new Set(),
-          deliveredOrders: 0,
-          rtoOrders: 0,
-          cancelledOrders: 0,
-          inTransitOrders: 0
-        };
-      }
-      
-      if (isCOD && !skuData[sku].codOrderIds.has(order.id)) {
-        skuData[sku].codOrderIds.add(order.id);
-        skuData[sku].codOrders++;
-        
-        if (shiprocketStatus === 'delivered') skuData[sku].deliveredOrders++;
-        else if (shiprocketStatus === 'rto') skuData[sku].rtoOrders++;
-        else if (shiprocketStatus === 'cancelled') skuData[sku].cancelledOrders++;
-        else if (shiprocketStatus === 'in_transit') skuData[sku].inTransitOrders++;
-        
-      } else if (!isCOD && !skuData[sku].prepaidOrderIds.has(order.id)) {
-        skuData[sku].prepaidOrderIds.add(order.id);
-        skuData[sku].prepaidOrders++;
-        
-        if (shiprocketStatus === 'delivered') skuData[sku].deliveredOrders++;
-      }
-      
-      const itemSubtotal = parseFloat(item.price) * item.quantity;
-      const proportion = itemSubtotal / itemsTotal;
-      const skuRevenue = orderTotal * proportion;
-      
-      if (isCOD) {
-        skuData[sku].codRevenue += skuRevenue;
-      } else {
-        skuData[sku].prepaidRevenue += skuRevenue;
-      }
-      
-      skuData[sku].totalRevenue += skuRevenue;
-    });
-  });
-  
-  const skus = Object.values(skuData).map(sku => {
-    const productNameLower = sku.productName.toLowerCase();
-    const productKey = productNameLower.split('™')[0].split('–')[0].trim();
-    
-    let adSpend = 0;
-    for (const [campaignName, spend] of Object.entries(adSpendByProduct)) {
-      if (productKey.startsWith(campaignName)) {
-        adSpend += spend;
-      }
-    }
-    
-    const attribution = productAttributionMap[productKey] || { orders: 0 };
-    const attributedOrders = attribution.orders;
-    const cac = attributedOrders > 0 ? adSpend / attributedOrders : 0;
-    
-    const totalOrders = sku.codOrders + sku.prepaidOrders;
-    const rates = predictiveRates[productKey] || { predictiveRTO: 0, predictiveCancel: 0 };
-    
-    return {
-      sku: sku.sku,
-      productName: sku.productName,
-      codRevenue: sku.codRevenue,
-      prepaidRevenue: sku.prepaidRevenue,
-      totalRevenue: sku.totalRevenue,
-      codOrders: sku.codOrders,
-      prepaidOrders: sku.prepaidOrders,
-      totalOrders: totalOrders,
-      adSpend: adSpend,
-      attributedOrders: attributedOrders,
-      cac: cac,
-      deliveredOrders: sku.deliveredOrders,
-      rtoOrders: sku.rtoOrders,
-      cancelledOrders: sku.cancelledOrders,
-      inTransitOrders: sku.inTransitOrders,
-      predictiveRTO: rates.predictiveRTO,
-      predictiveCancel: rates.predictiveCancel
-    };
-  });
-  
-  return { 
-    totalOrders: orders.length,
-    totalCODOrders: codCount,
-    totalPrepaidOrders: prepaidCount,
-    totalRevenue: codRevenue + prepaidRevenue,
-    manualReviewCount: manualReviewCount,
-    skus
-  };
-}
 
 app.listen(PORT, () => {
   console.log('Server running on port ' + PORT);
