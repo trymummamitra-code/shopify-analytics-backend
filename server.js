@@ -507,32 +507,6 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses, predictiveR
   };
 }
 
-app.get('/api/debug/shiprocket', async (req, res) => {
-  const token = await getShiprocketToken();
-  if (!token) return res.json({ error: 'No token' });
-  
-  try {
-    const response = await axios.get('https://apiv2.shiprocket.in/v1/external/orders', {
-      headers: { 'Authorization': `Bearer ${token}` },
-      params: { per_page: 10 }
-    });
-    
-    // Return first 3 orders to see structure
-    const sample = response.data.data.slice(0, 3).map(order => ({
-      channel_order_id: order.channel_order_id,
-      status: order.status,
-      pickup_scheduled_date: order.pickup_scheduled_date,
-      shipment_pickup: order.shipments?.[0]?.pickup_scheduled_date,
-      shipment_status: order.shipments?.[0]?.status,
-      all_shipment_fields: Object.keys(order.shipments?.[0] || {})
-    }));
-    
-    res.json({ sample });
-  } catch (error) {
-    res.json({ error: error.message });
-  }
-});
-
 app.get('/api/debug/shiprocket-full', async (req, res) => {
   const token = await getShiprocketToken();
   if (!token) return res.json({ error: 'No token' });
@@ -540,34 +514,56 @@ app.get('/api/debug/shiprocket-full', async (req, res) => {
   try {
     const response = await axios.get('https://apiv2.shiprocket.in/v1/external/orders', {
       headers: { 'Authorization': `Bearer ${token}` },
-      params: { per_page: 100 }
+      params: { per_page: 250 }
     });
     
-    // Group by status to see what numbers mean
     const statusCounts = {};
-    const statusSamples = {};
+    const dateRange = { oldest: null, newest: null };
+    const deliveredSample = [];
+    const rtoSample = [];
     
     response.data.data.forEach(order => {
       const status = order.shipments?.[0]?.status;
-      const mainStatus = order.status;
-      const key = `main:${mainStatus}|ship:${status}`;
+      const pickedUpDate = order.shipments?.[0]?.pickedup_timestamp;
+      const deliveredDate = order.shipments?.[0]?.delivered_date;
+      const rtoDate = order.shipments?.[0]?.rto_delivered_date;
       
+      const key = `ship:${status}`;
       statusCounts[key] = (statusCounts[key] || 0) + 1;
       
-      if (!statusSamples[key]) {
-        statusSamples[key] = {
+      // Track date range
+      if (pickedUpDate && pickedUpDate !== '0000-00-00 00:00:00' && pickedUpDate !== null) {
+        if (!dateRange.oldest || pickedUpDate < dateRange.oldest) dateRange.oldest = pickedUpDate;
+        if (!dateRange.newest || pickedUpDate > dateRange.newest) dateRange.newest = pickedUpDate;
+      }
+      
+      // Sample delivered orders
+      if (deliveredDate && deliveredDate !== '0000-00-00 00:00:00' && deliveredSample.length < 3) {
+        deliveredSample.push({
           channel_order_id: order.channel_order_id,
-          pickedup_timestamp: order.shipments?.[0]?.pickedup_timestamp,
-          delivered_date: order.shipments?.[0]?.delivered_date,
-          rto_delivered_date: order.shipments?.[0]?.rto_delivered_date
-        };
+          status,
+          pickedup_timestamp: pickedUpDate,
+          delivered_date: deliveredDate
+        });
+      }
+      
+      // Sample RTO orders
+      if (rtoDate && rtoDate !== '0000-00-00 00:00:00' && rtoSample.length < 3) {
+        rtoSample.push({
+          channel_order_id: order.channel_order_id,
+          status,
+          pickedup_timestamp: pickedUpDate,
+          rto_delivered_date: rtoDate
+        });
       }
     });
     
     res.json({ 
       totalOrders: response.data.data.length,
       statusCounts,
-      statusSamples 
+      dateRange,
+      deliveredSample,
+      rtoSample
     });
   } catch (error) {
     res.json({ error: error.message });
