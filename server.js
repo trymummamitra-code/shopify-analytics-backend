@@ -238,6 +238,31 @@ function processOrders(orders, adSpendByProduct) {
   };
 }
 
+app.get('/api/debug-adspend', async (req, res) => {
+  try {
+    const { date = 'yesterday' } = req.query;
+    const now = new Date();
+    const todayIST = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const yesterdayDate = new Date(now.getTime() - 86400000);
+    const yesterdayIST = yesterdayDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const targetDate = date === 'today' ? todayIST : yesterdayIST;
+    
+    const adSpendByProduct = await fetchMetaAdSpend(targetDate, targetDate);
+    
+    res.json({
+      success: true,
+      targetDate,
+      adSpendByProduct
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log('Server running on port ' + PORT);
+});
+
 app.listen(PORT, () => {
   console.log('Server running on port ' + PORT);
 });
