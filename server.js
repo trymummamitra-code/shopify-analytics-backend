@@ -540,6 +540,58 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses, predictiveR
   };
 }
 
+app.get('/api/debug/predictive', async (req, res) => {
+  try {
+    const targetDate = '2026-01-13'; // Yesterday
+    const targetDateObj = new Date(targetDate);
+    
+    // RTO: 14-7 days before target
+    const rtoEndDate = new Date(targetDateObj.getTime() - 7 * 86400000).toISOString().split('T')[0];
+    const rtoStartDate = new Date(targetDateObj.getTime() - 14 * 86400000).toISOString().split('T')[0];
+    
+    // Cancellation: 7-1 days before target  
+    const cancelEndDate = new Date(targetDateObj.getTime() - 1 * 86400000).toISOString().split('T')[0];
+    const cancelStartDate = new Date(targetDateObj.getTime() - 7 * 86400000).toISOString().split('T')[0];
+    
+    // Fetch data
+    const allShopifyOrders = await shopifyRequest('orders.json?limit=250&status=any');
+    const rtoShiprocketOrders = await fetchShiprocketOrdersForDateRange(rtoStartDate, rtoEndDate);
+    const cancelShiprocketOrders = await fetchShiprocketOrdersForDateRange(cancelStartDate, cancelEndDate);
+    
+    // Show what we got
+    const debug = {
+      dateRanges: {
+        rto: `${rtoStartDate} to ${rtoEndDate}`,
+        cancel: `${cancelStartDate} to ${cancelEndDate}`
+      },
+      counts: {
+        shopifyOrders: allShopifyOrders.orders.length,
+        rtoShiprocketOrders: rtoShiprocketOrders.length,
+        cancelShiprocketOrders: cancelShiprocketOrders.length
+      },
+      sampleShopifyOrder: allShopifyOrders.orders[0] ? {
+        name: allShopifyOrders.orders[0].name,
+        created_at: allShopifyOrders.orders[0].created_at,
+        product: allShopifyOrders.orders[0].line_items?.[0]?.name
+      } : null,
+      sampleRTOShiprocketOrder: rtoShiprocketOrders[0] ? {
+        channel_order_id: rtoShiprocketOrders[0].channel_order_id,
+        status: rtoShiprocketOrders[0].shipments?.[0]?.status,
+        pickedup_timestamp: rtoShiprocketOrders[0].shipments?.[0]?.pickedup_timestamp
+      } : null,
+      sampleCancelShiprocketOrder: cancelShiprocketOrders[0] ? {
+        channel_order_id: cancelShiprocketOrders[0].channel_order_id,
+        status: cancelShiprocketOrders[0].status,
+        shipment_status: cancelShiprocketOrders[0].shipments?.[0]?.status
+      } : null
+    };
+    
+    res.json(debug);
+  } catch (error) {
+    res.json({ error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log('Server running on port ' + PORT);
 });
