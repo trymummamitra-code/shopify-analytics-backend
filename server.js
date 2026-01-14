@@ -13,6 +13,9 @@ const REDIRECT_URI = process.env.REDIRECT_URI || 'http://localhost:3000/auth/cal
 const SCOPES = 'read_orders,read_products,read_customers,write_orders';
 const API_VERSION = '2024-01';
 
+const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+const META_AD_ACCOUNT_ID = process.env.META_AD_ACCOUNT_ID;
+
 let accessToken = process.env.SHOPIFY_ACCESS_TOKEN || null;
 
 app.use(cors());
@@ -53,6 +56,47 @@ const shopifyRequest = async (endpoint) => {
   return response.data;
 };
 
+const fetchMetaAdSpend = async (startDate, endDate) => {
+  if (!META_ACCESS_TOKEN || !META_AD_ACCOUNT_ID) {
+    return {};
+  }
+  
+  try {
+    const response = await axios.get(
+      `https://graph.facebook.com/v21.0/act_${META_AD_ACCOUNT_ID}/campaigns`,
+      {
+        params: {
+          access_token: META_ACCESS_TOKEN,
+          fields: 'name,insights.date_preset(maximum).time_range({"since":"' + startDate + '","until":"' + endDate + '"}){spend,campaign_name}',
+          limit: 500
+        }
+      }
+    );
+    
+    const campaigns = response.data.data || [];
+    const adSpendByProduct = {};
+    
+    campaigns.forEach(campaign => {
+      if (campaign.insights && campaign.insights.data && campaign.insights.data.length > 0) {
+        const spend = parseFloat(campaign.insights.data[0].spend || 0);
+        const campaignName = campaign.name;
+        
+        const productName = campaignName.split('|')[0].trim().toLowerCase();
+        
+        if (!adSpendByProduct[productName]) {
+          adSpendByProduct[productName] = 0;
+        }
+        adSpendByProduct[productName] += spend;
+      }
+    });
+    
+    return adSpendByProduct;
+  } catch (error) {
+    console.error('Meta API error:', error.response?.data || error.message);
+    return {};
+  }
+};
+
 app.get('/api/orders', async (req, res) => {
   try {
     const data = await shopifyRequest('orders.json?limit=250&status=any');
@@ -78,7 +122,9 @@ app.get('/api/analytics', async (req, res) => {
       return orderDateIST === targetDate;
     });
     
-    const analytics = processOrders(filteredOrders);
+    const adSpendByProduct = await fetchMetaAdSpend(targetDate, targetDate);
+    
+    const analytics = processOrders(filteredOrders, adSpendByProduct);
     
     res.json({
       success: true,
@@ -91,7 +137,7 @@ app.get('/api/analytics', async (req, res) => {
   }
 });
 
-function processOrders(orders) {
+function processOrders(orders, adSpendByProduct) {
   const skuData = {};
   let codCount = 0;
   let prepaidCount = 0;
@@ -133,11 +179,11 @@ function processOrders(orders) {
           codOrders: 0,
           prepaidOrders: 0,
           codOrderIds: new Set(),
-          prepaidOrderIds: new Set()
+          prepaidOrderIds: new Set(),
+          adSpend: 0
         };
       }
       
-      // Track unique orders per SKU
       if (isCOD && !skuData[sku].codOrderIds.has(order.id)) {
         skuData[sku].codOrderIds.add(order.id);
         skuData[sku].codOrders++;
@@ -160,16 +206,21 @@ function processOrders(orders) {
     });
   });
   
-  // Clean up and convert to array
-  const skus = Object.values(skuData).map(sku => ({
-    sku: sku.sku,
-    productName: sku.productName,
-    codRevenue: sku.codRevenue,
-    prepaidRevenue: sku.prepaidRevenue,
-    totalRevenue: sku.totalRevenue,
-    codOrders: sku.codOrders,
-    prepaidOrders: sku.prepaidOrders
-  }));
+  const skus = Object.values(skuData).map(sku => {
+    const productNameLower = sku.productName.split('™')[0].split('–')[0].trim().toLowerCase();
+    const adSpend = adSpendByProduct[productNameLower] || 0;
+    
+    return {
+      sku: sku.sku,
+      productName: sku.productName,
+      codRevenue: sku.codRevenue,
+      prepaidRevenue: sku.prepaidRevenue,
+      totalRevenue: sku.totalRevenue,
+      codOrders: sku.codOrders,
+      prepaidOrders: sku.prepaidOrders,
+      adSpend: adSpend
+    };
+  });
   
   return { 
     totalOrders: orders.length,
