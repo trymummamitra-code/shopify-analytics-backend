@@ -533,6 +533,47 @@ app.get('/api/debug/shiprocket', async (req, res) => {
   }
 });
 
+app.get('/api/debug/shiprocket-full', async (req, res) => {
+  const token = await getShiprocketToken();
+  if (!token) return res.json({ error: 'No token' });
+  
+  try {
+    const response = await axios.get('https://apiv2.shiprocket.in/v1/external/orders', {
+      headers: { 'Authorization': `Bearer ${token}` },
+      params: { per_page: 100 }
+    });
+    
+    // Group by status to see what numbers mean
+    const statusCounts = {};
+    const statusSamples = {};
+    
+    response.data.data.forEach(order => {
+      const status = order.shipments?.[0]?.status;
+      const mainStatus = order.status;
+      const key = `main:${mainStatus}|ship:${status}`;
+      
+      statusCounts[key] = (statusCounts[key] || 0) + 1;
+      
+      if (!statusSamples[key]) {
+        statusSamples[key] = {
+          channel_order_id: order.channel_order_id,
+          pickedup_timestamp: order.shipments?.[0]?.pickedup_timestamp,
+          delivered_date: order.shipments?.[0]?.delivered_date,
+          rto_delivered_date: order.shipments?.[0]?.rto_delivered_date
+        };
+      }
+    });
+    
+    res.json({ 
+      totalOrders: response.data.data.length,
+      statusCounts,
+      statusSamples 
+    });
+  } catch (error) {
+    res.json({ error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log('Server running on port ' + PORT);
 });
