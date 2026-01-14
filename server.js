@@ -592,6 +592,67 @@ app.get('/api/debug/predictive', async (req, res) => {
   }
 });
 
+app.get('/api/debug/find-pickups', async (req, res) => {
+  try {
+    const token = await getShiprocketToken();
+    if (!token) return res.json({ error: 'No token' });
+    
+    // Fetch 250 orders without date filter
+    const response = await axios.get('https://apiv2.shiprocket.in/v1/external/orders', {
+      headers: { 'Authorization': `Bearer ${token}` },
+      params: { per_page: 250 }
+    });
+    
+    const ordersWithPickup = [];
+    const ordersDelivered = [];
+    const ordersRTO = [];
+    
+    response.data.data.forEach(order => {
+      const pickupDate = order.shipments?.[0]?.pickedup_timestamp;
+      const status = order.shipments?.[0]?.status;
+      const deliveredDate = order.shipments?.[0]?.delivered_date;
+      
+      if (pickupDate && pickupDate !== '0000-00-00 00:00:00' && pickupDate !== null) {
+        ordersWithPickup.push({
+          channel_order_id: order.channel_order_id,
+          pickedup_timestamp: pickupDate,
+          status: status,
+          delivered_date: deliveredDate
+        });
+      }
+      
+      if (status === 6 || status === 7) {
+        ordersDelivered.push({
+          channel_order_id: order.channel_order_id,
+          status: status,
+          pickedup_timestamp: pickupDate,
+          delivered_date: deliveredDate
+        });
+      }
+      
+      if ([9, 10, 12, 13, 14, 15, 16, 17].includes(status)) {
+        ordersRTO.push({
+          channel_order_id: order.channel_order_id,
+          status: status,
+          pickedup_timestamp: pickupDate
+        });
+      }
+    });
+    
+    res.json({
+      totalOrders: response.data.data.length,
+      ordersWithPickupDate: ordersWithPickup.length,
+      ordersDelivered: ordersDelivered.length,
+      ordersRTO: ordersRTO.length,
+      samplePickup: ordersWithPickup.slice(0, 3),
+      sampleDelivered: ordersDelivered.slice(0, 3),
+      sampleRTO: ordersRTO.slice(0, 3)
+    });
+  } catch (error) {
+    res.json({ error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log('Server running on port ' + PORT);
 });
