@@ -16,7 +16,12 @@ const API_VERSION = '2024-01';
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const META_AD_ACCOUNT_ID = process.env.META_AD_ACCOUNT_ID;
 
+const SHIPROCKET_EMAIL = process.env.SHIPROCKET_EMAIL;
+const SHIPROCKET_PASSWORD = process.env.SHIPROCKET_PASSWORD;
+
 let accessToken = process.env.SHOPIFY_ACCESS_TOKEN || null;
+let shiprocketToken = null;
+let shiprocketTokenExpiry = null;
 
 app.use(cors());
 app.use(express.json());
@@ -56,9 +61,76 @@ const shopifyRequest = async (endpoint) => {
   return response.data;
 };
 
+const getShiprocketToken = async () => {
+  if (shiprocketToken && shiprocketTokenExpiry && Date.now() < shiprocketTokenExpiry) {
+    return shiprocketToken;
+  }
+  
+  if (!SHIPROCKET_EMAIL || !SHIPROCKET_PASSWORD) {
+    console.log('Shiprocket credentials missing');
+    return null;
+  }
+  
+  try {
+    const response = await axios.post('https://apiv2.shiprocket.in/v1/external/auth/login', {
+      email: SHIPROCKET_EMAIL,
+      password: SHIPROCKET_PASSWORD
+    });
+    
+    shiprocketToken = response.data.token;
+    shiprocketTokenExpiry = Date.now() + (10 * 24 * 60 * 60 * 1000); // 10 days
+    console.log('✓ Shiprocket authenticated');
+    
+    return shiprocketToken;
+  } catch (error) {
+    console.error('Shiprocket auth error:', error.response?.data || error.message);
+    return null;
+  }
+};
+
+const fetchShiprocketOrders = async () => {
+  const token = await getShiprocketToken();
+  if (!token) return {};
+  
+  try {
+    const response = await axios.get('https://apiv2.shiprocket.in/v1/external/orders', {
+      headers: { 'Authorization': `Bearer ${token}` },
+      params: { per_page: 250 }
+    });
+    
+    const orders = response.data.data || [];
+    const orderStatusMap = {};
+    
+    orders.forEach(order => {
+      const orderNumber = order.channel_order_id;
+      const status = order.status?.toLowerCase() || '';
+      const shipmentStatus = order.shipments?.[0]?.status?.toLowerCase() || '';
+      
+      let deliveryStatus = 'pending';
+      
+      if (status === 'cancelled' || status === 'canceled') {
+        deliveryStatus = 'cancelled';
+      } else if (shipmentStatus.includes('delivered')) {
+        deliveryStatus = 'delivered';
+      } else if (shipmentStatus.includes('rto') || status.includes('rto')) {
+        deliveryStatus = 'rto';
+      } else if (shipmentStatus.includes('transit') || shipmentStatus.includes('shipped')) {
+        deliveryStatus = 'in_transit';
+      }
+      
+      orderStatusMap[orderNumber] = deliveryStatus;
+    });
+    
+    console.log(`✓ Fetched ${orders.length} Shiprocket orders`);
+    return orderStatusMap;
+  } catch (error) {
+    console.error('Shiprocket orders error:', error.response?.data || error.message);
+    return {};
+  }
+};
+
 const fetchMetaAdSpend = async (startDate, endDate) => {
   if (!META_ACCESS_TOKEN || !META_AD_ACCOUNT_ID) {
-    console.log('Meta credentials missing');
     return {};
   }
   
@@ -77,14 +149,11 @@ const fetchMetaAdSpend = async (startDate, endDate) => {
     const campaigns = response.data.data || [];
     const adSpendByProduct = {};
     
-    console.log('=== META CAMPAIGNS ===');
     campaigns.forEach(campaign => {
       if (campaign.insights && campaign.insights.data && campaign.insights.data.length > 0) {
         const spend = parseFloat(campaign.insights.data[0].spend || 0);
         const campaignName = campaign.name;
         const productName = campaignName.split('|')[0].trim().toLowerCase();
-        
-        console.log(`Campaign: "${campaignName}" -> Extract: "${productName}" -> Spend: ₹${spend}`);
         
         if (!adSpendByProduct[productName]) {
           adSpendByProduct[productName] = 0;
@@ -92,7 +161,6 @@ const fetchMetaAdSpend = async (startDate, endDate) => {
         adSpendByProduct[productName] += spend;
       }
     });
-    console.log('Final mapping:', adSpendByProduct);
     
     return adSpendByProduct;
   } catch (error) {
@@ -117,8 +185,12 @@ app.get('/api/analytics', async (req, res) => {
       return orderDateIST === targetDate;
     });
     
-    const adSpendByProduct = await fetchMetaAdSpend(targetDate, targetDate);
-    const analytics = processOrders(filteredOrders, adSpendByProduct);
+    const [adSpendByProduct, shiprocketStatuses] = await Promise.all([
+      fetchMetaAdSpend(targetDate, targetDate),
+      fetchShiprocketOrders()
+    ]);
+    
+    const analytics = processOrders(filteredOrders, adSpendByProduct, shiprocketStatuses);
     
     res.json({ success: true, date, targetDate, analytics });
   } catch (error) {
@@ -126,7 +198,7 @@ app.get('/api/analytics', async (req, res) => {
   }
 });
 
-function processOrders(orders, adSpendByProduct) {
+function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
   const skuData = {};
   let codCount = 0;
   let prepaidCount = 0;
@@ -140,6 +212,8 @@ function processOrders(orders, adSpendByProduct) {
     );
     
     const orderTotal = parseFloat(order.total_price || 0);
+    const orderNumber = order.name?.replace('#', '') || order.order_number;
+    const shiprocketStatus = shiprocketStatuses[orderNumber] || 'unknown';
     
     if (!seenOrders.has(order.id)) {
       seenOrders.add(order.id);
@@ -168,16 +242,31 @@ function processOrders(orders, adSpendByProduct) {
           codOrders: 0,
           prepaidOrders: 0,
           codOrderIds: new Set(),
-          prepaidOrderIds: new Set()
+          prepaidOrderIds: new Set(),
+          deliveredOrders: 0,
+          rtoOrders: 0,
+          cancelledOrders: 0,
+          inTransitOrders: 0
         };
       }
       
       if (isCOD && !skuData[sku].codOrderIds.has(order.id)) {
         skuData[sku].codOrderIds.add(order.id);
         skuData[sku].codOrders++;
+        
+        if (shiprocketStatus === 'delivered') skuData[sku].deliveredOrders++;
+        else if (shiprocketStatus === 'rto') skuData[sku].rtoOrders++;
+        else if (shiprocketStatus === 'cancelled') skuData[sku].cancelledOrders++;
+        else if (shiprocketStatus === 'in_transit') skuData[sku].inTransitOrders++;
+        
       } else if (!isCOD && !skuData[sku].prepaidOrderIds.has(order.id)) {
         skuData[sku].prepaidOrderIds.add(order.id);
         skuData[sku].prepaidOrders++;
+        
+        if (shiprocketStatus === 'delivered') skuData[sku].deliveredOrders++;
+        else if (shiprocketStatus === 'rto') skuData[sku].rtoOrders++;
+        else if (shiprocketStatus === 'cancelled') skuData[sku].cancelledOrders++;
+        else if (shiprocketStatus === 'in_transit') skuData[sku].inTransitOrders++;
       }
       
       const itemSubtotal = parseFloat(item.price) * item.quantity;
@@ -194,21 +283,20 @@ function processOrders(orders, adSpendByProduct) {
     });
   });
   
-  console.log('=== MATCHING PRODUCTS TO CAMPAIGNS ===');
   const skus = Object.values(skuData).map(sku => {
     const productNameLower = sku.productName.toLowerCase();
     let adSpend = 0;
     
     for (const [campaignName, spend] of Object.entries(adSpendByProduct)) {
       if (productNameLower.startsWith(campaignName)) {
-        console.log(`✓ Product "${sku.productName}" matches campaign "${campaignName}" -> ₹${spend}`);
         adSpend += spend;
       }
     }
     
-    if (adSpend === 0) {
-      console.log(`✗ Product "${sku.productName}" - NO MATCH`);
-    }
+    const totalOrders = sku.codOrders + sku.prepaidOrders;
+    const rtoRate = totalOrders > 0 ? (sku.rtoOrders / totalOrders * 100) : 0;
+    const cancellationRate = totalOrders > 0 ? (sku.cancelledOrders / totalOrders * 100) : 0;
+    const deliveryRate = totalOrders > 0 ? (sku.deliveredOrders / totalOrders * 100) : 0;
     
     return {
       sku: sku.sku,
@@ -218,7 +306,14 @@ function processOrders(orders, adSpendByProduct) {
       totalRevenue: sku.totalRevenue,
       codOrders: sku.codOrders,
       prepaidOrders: sku.prepaidOrders,
-      adSpend: adSpend
+      adSpend: adSpend,
+      deliveredOrders: sku.deliveredOrders,
+      rtoOrders: sku.rtoOrders,
+      cancelledOrders: sku.cancelledOrders,
+      inTransitOrders: sku.inTransitOrders,
+      rtoRate: rtoRate,
+      cancellationRate: cancellationRate,
+      deliveryRate: deliveryRate
     };
   });
   
