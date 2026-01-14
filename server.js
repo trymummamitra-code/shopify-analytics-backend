@@ -533,6 +533,92 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses, predictiveR
   };
 }
 
+app.get('/api/debug/final', async (req, res) => {
+  try {
+    const targetDate = '2026-01-13';
+    const targetDateObj = new Date(targetDate);
+    
+    // RTO range: Dec 30 - Jan 6 (pickup dates)
+    const rtoEnd = new Date(targetDateObj.getTime() - 7 * 86400000).toISOString().split('T')[0];
+    const rtoStart = new Date(targetDateObj.getTime() - 14 * 86400000).toISOString().split('T')[0];
+    
+    // Cancel range: Jan 6-12 (created dates)
+    const cancelEnd = new Date(targetDateObj.getTime() - 1 * 86400000).toISOString().split('T')[0];
+    const cancelStart = new Date(targetDateObj.getTime() - 7 * 86400000).toISOString().split('T')[0];
+    
+    // Fetch everything
+    const shopifyData = await shopifyRequest('orders.json?limit=250&status=any');
+    const shiprocketOrders = await fetchShiprocketOrders('2025-12-15', '2026-01-13');
+    
+    // Build map
+    const shiprocketMap = {};
+    shiprocketOrders.forEach(o => {
+      shiprocketMap[o.channel_order_id] = {
+        status: o.shipments?.[0]?.status,
+        mainStatus: o.status,
+        pickup: o.shipments?.[0]?.pickedup_timestamp
+      };
+    });
+    
+    // Find Shopify orders created in cancel range
+    const shopifyInCancelRange = shopifyData.orders.filter(o => {
+      const created = new Date(o.created_at).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+      return created >= cancelStart && created <= cancelEnd;
+    }).slice(0, 5);
+    
+    // Check their Shiprocket data
+    const cancelSamples = shopifyInCancelRange.map(o => {
+      const orderNum = o.name?.replace('#', '');
+      const sr = shiprocketMap[orderNum];
+      return {
+        shopify_order: orderNum,
+        shopify_created: new Date(o.created_at).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }),
+        found_in_shiprocket: !!sr,
+        shiprocket_status: sr?.status,
+        shiprocket_mainStatus: sr?.mainStatus,
+        shiprocket_pickup: sr?.pickup
+      };
+    });
+    
+    // Find orders with pickup dates in RTO range
+    const ordersWithPickupInRange = [];
+    shopifyData.orders.forEach(o => {
+      const orderNum = o.name?.replace('#', '');
+      const sr = shiprocketMap[orderNum];
+      
+      if (sr && sr.pickup && sr.pickup !== '0000-00-00 00:00:00' && sr.pickup !== null) {
+        const pickupDate = sr.pickup.split(' ')[0];
+        if (pickupDate >= rtoStart && pickupDate <= rtoEnd) {
+          ordersWithPickupInRange.push({
+            order: orderNum,
+            pickup: pickupDate,
+            status: sr.status,
+            isDelivered: sr.status === 6 || sr.status === 7
+          });
+        }
+      }
+    });
+    
+    res.json({
+      ranges: {
+        rto: `${rtoStart} to ${rtoEnd}`,
+        cancel: `${cancelStart} to ${cancelEnd}`
+      },
+      shiprocketFetched: shiprocketOrders.length,
+      cancelRange: {
+        shopifyOrdersInRange: shopifyInCancelRange.length,
+        samples: cancelSamples
+      },
+      rtoRange: {
+        ordersWithPickupInRange: ordersWithPickupInRange.length,
+        samples: ordersWithPickupInRange.slice(0, 5)
+      }
+    });
+  } catch (error) {
+    res.json({ error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log('Server running on port ' + PORT);
 });
