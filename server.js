@@ -104,6 +104,7 @@ const fetchShiprocketOrders = async () => {
       const orderNumber = order.channel_order_id;
       const status = String(order.status || '').toLowerCase();
       const shipmentStatus = String(order.shipments?.[0]?.status || '').toLowerCase();
+      const pickupDate = order.pickup_scheduled_date || order.shipments?.[0]?.pickup_scheduled_date;
       
       let deliveryStatus = 'pending';
       
@@ -128,7 +129,10 @@ const fetchShiprocketOrders = async () => {
         deliveryStatus = 'in_transit';
       }
       
-      orderStatusMap[orderNumber] = deliveryStatus;
+      orderStatusMap[orderNumber] = {
+        status: deliveryStatus,
+        pickupDate: pickupDate
+      };
     });
     
     console.log(`✓ Fetched ${orders.length} Shiprocket orders`);
@@ -200,13 +204,15 @@ const extractProductFromUTM = (landingPageUrl) => {
 app.get('/api/analytics', async (req, res) => {
   try {
     const { date = 'today' } = req.query;
-    const data = await shopifyRequest('orders.json?limit=250&status=any');
     
     const now = new Date();
     const todayIST = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     const yesterdayDate = new Date(now.getTime() - 86400000);
     const yesterdayIST = yesterdayDate.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     const targetDate = date === 'today' ? todayIST : yesterdayIST;
+    
+    // Fetch last 14 days for historical analysis
+    const data = await shopifyRequest('orders.json?limit=250&status=any');
     
     const filteredOrders = data.orders.filter(order => {
       const orderDateIST = new Date(order.created_at).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -218,7 +224,11 @@ app.get('/api/analytics', async (req, res) => {
       fetchShiprocketOrders()
     ]);
     
-    const analytics = processOrders(filteredOrders, adSpendByProduct, shiprocketStatuses);
+    // Calculate predictive rates from historical data
+    const targetDateObj = new Date(targetDate);
+    const predictiveRates = calculatePredictiveRates(data.orders, shiprocketStatuses, targetDateObj);
+    
+    const analytics = processOrders(filteredOrders, adSpendByProduct, shiprocketStatuses, predictiveRates);
     
     res.json({ success: true, date, targetDate, analytics });
   } catch (error) {
@@ -226,7 +236,100 @@ app.get('/api/analytics', async (req, res) => {
   }
 });
 
-function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
+function calculatePredictiveRates(allOrders, shiprocketStatuses, targetDate) {
+  const productRates = {};
+  
+  // RTO: 14-7 days before target (pickup date range)
+  const rtoEndDate = new Date(targetDate.getTime() - 7 * 86400000);
+  const rtoStartDate = new Date(targetDate.getTime() - 14 * 86400000);
+  
+  // Cancellation: 7-1 days before target (created date range)
+  const cancelEndDate = new Date(targetDate.getTime() - 1 * 86400000);
+  const cancelStartDate = new Date(targetDate.getTime() - 7 * 86400000);
+  
+  allOrders.forEach(order => {
+    const orderCreatedIST = new Date(order.created_at).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const orderCreatedDate = new Date(orderCreatedIST);
+    const orderNumber = order.name?.replace('#', '') || order.order_number;
+    const shiprocketData = shiprocketStatuses[orderNumber];
+    
+    const isCOD = order.payment_gateway_names?.some(gw => 
+      gw.toLowerCase().includes('cod') || gw.toLowerCase().includes('cash on delivery')
+    );
+    
+    // Get attributed product
+    const landingPageUrl = order.landing_site;
+    const utmProduct = extractProductFromUTM(landingPageUrl);
+    let attributedProduct = null;
+    
+    if (utmProduct) {
+      attributedProduct = utmProduct;
+    } else {
+      const lineItems = order.line_items || [];
+      if (lineItems.length === 1) {
+        const productName = lineItems[0].name.toLowerCase();
+        attributedProduct = productName.split('™')[0].split('–')[0].trim();
+      } else if (lineItems.length > 1) {
+        const revenueMap = {};
+        lineItems.forEach(item => {
+          const productName = item.name.toLowerCase();
+          const productKey = productName.split('™')[0].split('–')[0].trim();
+          const itemRevenue = parseFloat(item.price) * item.quantity;
+          revenueMap[productKey] = (revenueMap[productKey] || 0) + itemRevenue;
+        });
+        const sorted = Object.entries(revenueMap).sort((a, b) => b[1] - a[1]);
+        if (sorted[0][1] / Object.values(revenueMap).reduce((a,b) => a+b, 0) > 0.5) {
+          attributedProduct = sorted[0][0];
+        }
+      }
+    }
+    
+    if (!attributedProduct) return;
+    
+    if (!productRates[attributedProduct]) {
+      productRates[attributedProduct] = {
+        rtoTotal: 0,
+        rtoNotDelivered: 0,
+        cancelTotal: 0,
+        cancelCancelled: 0
+      };
+    }
+    
+    // RTO calculation (only COD, pickup date 14-7 days ago)
+    if (isCOD && shiprocketData?.pickupDate) {
+      const pickupDateIST = new Date(shiprocketData.pickupDate).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+      const pickupDate = new Date(pickupDateIST);
+      
+      if (pickupDate >= rtoStartDate && pickupDate <= rtoEndDate) {
+        productRates[attributedProduct].rtoTotal++;
+        if (shiprocketData.status !== 'delivered') {
+          productRates[attributedProduct].rtoNotDelivered++;
+        }
+      }
+    }
+    
+    // Cancellation calculation (all orders, created 7-1 days ago)
+    if (orderCreatedDate >= cancelStartDate && orderCreatedDate <= cancelEndDate) {
+      productRates[attributedProduct].cancelTotal++;
+      if (shiprocketData?.status === 'cancelled') {
+        productRates[attributedProduct].cancelCancelled++;
+      }
+    }
+  });
+  
+  // Calculate percentages
+  const rates = {};
+  for (const [product, data] of Object.entries(productRates)) {
+    rates[product] = {
+      predictiveRTO: data.rtoTotal > 0 ? (data.rtoNotDelivered / data.rtoTotal * 100) : 0,
+      predictiveCancel: data.cancelTotal > 0 ? (data.cancelCancelled / data.cancelTotal * 100) : 0
+    };
+  }
+  
+  return rates;
+}
+
+function processOrders(orders, adSpendByProduct, shiprocketStatuses, predictiveRates) {
   const skuData = {};
   const productAttributionMap = {};
   let codCount = 0;
@@ -243,7 +346,8 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
     
     const orderTotal = parseFloat(order.total_price || 0);
     const orderNumber = order.name?.replace('#', '') || order.order_number;
-    const shiprocketStatus = shiprocketStatuses[orderNumber] || 'unknown';
+    const shiprocketData = shiprocketStatuses[orderNumber];
+    const shiprocketStatus = shiprocketData?.status || 'unknown';
     
     if (!seenOrders.has(order.id)) {
       seenOrders.add(order.id);
@@ -370,8 +474,7 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
     const cac = attributedOrders > 0 ? adSpend / attributedOrders : 0;
     
     const totalOrders = sku.codOrders + sku.prepaidOrders;
-    const rtoRate = sku.codOrders > 0 ? (sku.rtoOrders / sku.codOrders * 100) : 0;
-    const cancellationRate = sku.codOrders > 0 ? (sku.cancelledOrders / sku.codOrders * 100) : 0;
+    const rates = predictiveRates[productKey] || { predictiveRTO: 0, predictiveCancel: 0 };
     
     return {
       sku: sku.sku,
@@ -389,8 +492,8 @@ function processOrders(orders, adSpendByProduct, shiprocketStatuses) {
       rtoOrders: sku.rtoOrders,
       cancelledOrders: sku.cancelledOrders,
       inTransitOrders: sku.inTransitOrders,
-      rtoRate: rtoRate,
-      cancellationRate: cancellationRate
+      predictiveRTO: rates.predictiveRTO,
+      predictiveCancel: rates.predictiveCancel
     };
   });
   
